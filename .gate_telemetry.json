@@ -1,21 +1,21 @@
 {
   "project": "HockeyJockey",
-  "timestamp": "2026-11-19T14:06:57.685629+00:00",
+  "timestamp": "2026-11-19T14:38:22.222020+00:00",
   "required_tools": "git,node,npm,python,gh",
   "stages": {
     "STAGE_0_PROBE": {
       "status": "PASS",
-      "duration": 0.07,
+      "duration": 0.09,
       "error": null
     },
     "STAGE_1_STATIC": {
       "status": "PASS",
-      "duration": 5.57,
+      "duration": 9.26,
       "error": null
     },
     "STAGE_2_NATIVE_UNIT": {
       "status": "PASS",
-      "duration": 4.66,
+      "duration": 6.99,
       "error": null
     },
     "STAGE_3_HEADLESS": {
@@ -25,11 +25,11 @@
     },
     "STAGE_4_ORACLE": {
       "status": "PASS",
-      "duration": 14.79,
+      "duration": 31.37,
       "error": null
     }
   },
   "overall_status": "VERIFIED",
   "exit_code": 0,
-  "duration_seconds": 25.09
+  "duration_seconds": 47.72
 }

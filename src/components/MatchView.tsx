@@ -1,4 +1,5 @@
 import {
+  FileAudio,
   Flame,
   Layers,
   Music,
@@ -22,7 +23,11 @@ import type {
   SoundPad,
   Team,
 } from '../types/models.ts';
-import { formatMsToMmSs, selectNextTrack } from '../utils/domain.ts';
+import {
+  formatMsToMmSs,
+  isLocalAudioUri,
+  selectNextTrack,
+} from '../utils/domain.ts';
 
 interface MatchViewProps {
   teams: {
@@ -419,6 +424,10 @@ export function MatchView({
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
                   {padsInCategory.map((pad) => {
                     const { track: nextTrack } = selectNextTrack(pad);
+                    const isNextLocal =
+                      nextTrack !== null &&
+                      (nextTrack.sourceType === 'local' ||
+                        isLocalAudioUri(nextTrack.trackUri));
                     const lastPlayedTrack =
                       pad.lastPlayedIndex !== undefined
                         ? pad.tracks[pad.lastPlayedIndex]
@@ -473,11 +482,26 @@ export function MatchView({
                         </div>
 
                         <div className="mt-3 flex items-center justify-between gap-2 text-xs">
-                          <span className="truncate text-slate-300">
-                            {nextTrack
-                              ? `Nästa: ${nextTrack.title}`
-                              : 'Inga låtar konfigurerade'}
-                          </span>
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            {isNextLocal && (
+                              <span
+                                className="inline-flex shrink-0 items-center gap-1 rounded border border-cyan-500/40 bg-cyan-950/70 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-200"
+                                title={
+                                  nextTrack?.localFileName
+                                    ? `Lokal ljudfil: ${nextTrack.localFileName}`
+                                    : 'Lokal ljudfil'
+                                }
+                              >
+                                <FileAudio className="h-3 w-3" />
+                                Lokal
+                              </span>
+                            )}
+                            <span className="truncate text-slate-300">
+                              {nextTrack
+                                ? `Nästa: ${nextTrack.title}`
+                                : 'Inga låtar konfigurerade'}
+                            </span>
+                          </div>
                           {nextTrack && (
                             <span className="shrink-0 font-mono text-slate-400">
                               {formatMsToMmSs(nextTrack.startTimeMs)}

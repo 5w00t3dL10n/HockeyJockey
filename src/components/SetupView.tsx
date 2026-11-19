@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Copy,
   Download,
+  FileAudio,
   Keyboard,
   Layers,
   Loader2,
@@ -27,6 +28,10 @@ import {
   PAD_CATEGORY_LABELS,
   getPadCategoryLabel,
 } from '../data/defaults.ts';
+import {
+  getLocalAudioRecord,
+  saveLocalAudioFile,
+} from '../services/localAudioStorage.ts';
 import { fetchSpotifyTrackMetadata } from '../services/spotifyMetadata.ts';
 import { useAppStore } from '../store/useAppStore.ts';
 import type {
@@ -43,6 +48,7 @@ import type {
 import {
   extractSpotifyTrackId,
   formatMsToMmSs,
+  isLocalAudioUri,
   isValidMmSs,
   parseRosterText,
   parseTimeMmSsToMs,
@@ -987,7 +993,10 @@ function TrackCueRow({
   const [metaStatus, setMetaStatus] = useState<MetadataLookupStatus>({
     state: 'idle',
   });
+  const [localFileMissing, setLocalFileMissing] = useState(false);
+  const [isSavingLocalFile, setIsSavingLocalFile] = useState(false);
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const fetchSeqRef = useRef(0);
   const latestTrackIdRef = useRef<string | null>(
     extractSpotifyTrackId(track.trackUri),
@@ -996,6 +1005,9 @@ function TrackCueRow({
     extractSpotifyTrackId(track.trackUri),
   );
   const lastEmittedUriRef = useRef(track.trackUri);
+
+  const isLocalTrack =
+    track.sourceType === 'local' || isLocalAudioUri(track.trackUri);
 
   useEffect(() => {
     if (track.trackUri !== lastEmittedUriRef.current) {
@@ -1015,7 +1027,28 @@ function TrackCueRow({
     setTimeValid(true);
   }, [track.startTimeMs]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!isLocalTrack) {
+      setLocalFileMissing(false);
+      return;
+    }
+    void getLocalAudioRecord(track.trackUri).then((record) => {
+      if (!cancelled) {
+        setLocalFileMissing(record === null);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isLocalTrack, track.trackUri]);
+
   const runMetadataLookup = async (rawInput: string, force: boolean) => {
+    if (isLocalAudioUri(rawInput)) {
+      latestTrackIdRef.current = null;
+      setMetaStatus({ state: 'idle' });
+      return;
+    }
     const trackId = extractSpotifyTrackId(rawInput);
     if (!trackId) {
       latestTrackIdRef.current = null;
@@ -1055,6 +1088,9 @@ function TrackCueRow({
       lastEmittedUriRef.current = metadata.trackUri;
       onUpdate({
         trackUri: metadata.trackUri,
+        sourceType: 'spotify',
+        localFileName: undefined,
+        mimeType: undefined,
         title: metadata.title,
         artist: metadata.artist,
       });
@@ -1072,14 +1108,75 @@ function TrackCueRow({
     }
   };
 
+  const handleLocalFileSelected = async (
+    e: ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) {
+      return;
+    }
+
+    setIsSavingLocalFile(true);
+    setUriError(null);
+    try {
+      const reuseMissingUri =
+        localFileMissing && isLocalAudioUri(track.trackUri)
+          ? track.trackUri
+          : undefined;
+      const saved = await saveLocalAudioFile(file, reuseMissingUri);
+      lastEmittedUriRef.current = saved.trackUri;
+      setUriInput(saved.trackUri);
+      latestTrackIdRef.current = null;
+      lastAutoFetchedIdRef.current = null;
+      fetchSeqRef.current += 1;
+      setLocalFileMissing(false);
+      onUpdate({
+        trackUri: saved.trackUri,
+        sourceType: 'local',
+        localFileName: saved.fileName,
+        mimeType: saved.mimeType,
+        title: saved.title,
+        artist: saved.artist,
+      });
+      setMetaStatus({
+        state: 'success',
+        message: `Sparade lokal ljudfil: ${saved.fileName}`,
+      });
+    } catch {
+      setMetaStatus({
+        state: 'error',
+        message: 'Kunde inte spara vald ljudfil i webbläsarens lagring.',
+      });
+    } finally {
+      setIsSavingLocalFile(false);
+    }
+  };
+
   const handleUriChange = (raw: string) => {
     setUriInput(raw);
     const parsed = tryParseSpotifyUri(raw);
     if (parsed.ok) {
       setUriError(null);
       lastEmittedUriRef.current = parsed.uri;
-      onUpdate({ trackUri: parsed.uri });
-      void runMetadataLookup(raw, false);
+      if (isLocalAudioUri(parsed.uri)) {
+        latestTrackIdRef.current = null;
+        lastAutoFetchedIdRef.current = null;
+        fetchSeqRef.current += 1;
+        setMetaStatus({ state: 'idle' });
+        onUpdate({
+          trackUri: parsed.uri,
+          sourceType: 'local',
+        });
+      } else {
+        onUpdate({
+          trackUri: parsed.uri,
+          sourceType: 'spotify',
+          localFileName: undefined,
+          mimeType: undefined,
+        });
+        void runMetadataLookup(raw, false);
+      }
     } else {
       setUriError(parsed.error);
       latestTrackIdRef.current = null;
@@ -1103,6 +1200,44 @@ function TrackCueRow({
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-950/90 p-3 space-y-2.5">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac,.webm"
+        onChange={(e) => void handleLocalFileSelected(e)}
+        className="hidden"
+      />
+
+      {isLocalTrack && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/40 bg-cyan-950/60 px-2.5 py-0.5 text-[11px] font-bold text-cyan-200">
+            <FileAudio className="h-3.5 w-3.5 shrink-0" />
+            Lokal ljudfil: {track.localFileName || track.title || track.trackUri}
+          </span>
+        </div>
+      )}
+
+      {isLocalTrack && localFileMissing && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+            <span>
+              Lokal ljudfil saknas i denna webbläsares IndexedDB (t.ex. efter
+              JSON-import) – välj filen igen.
+            </span>
+          </div>
+          <button
+            type="button"
+            disabled={isSavingLocalFile}
+            onClick={() => fileInputRef.current?.click()}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-amber-400/50 bg-amber-600/30 px-2.5 py-1 text-xs font-bold text-amber-100 hover:bg-amber-600/50 disabled:opacity-40 cursor-pointer"
+          >
+            <FileAudio className="h-3.5 w-3.5" />
+            Välj om ljudfil...
+          </button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_110px_auto] gap-2.5 items-start">
         <div>
           <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
@@ -1172,14 +1307,14 @@ function TrackCueRow({
 
       <div>
         <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
-          Spotify-länk eller URI (auto-konverteras)
+          Spotify-länk, URI eller lokal ljudfil
         </label>
         <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
           <input
             type="text"
             value={uriInput}
             onChange={(e) => handleUriChange(e.target.value)}
-            placeholder="https://open.spotify.com/track/... eller spotify:track:..."
+            placeholder="https://open.spotify.com/track/..., spotify:track:... eller local:audio:..."
             className={`flex-1 min-w-0 rounded-lg border px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:outline-none ${
               uriError
                 ? 'border-red-500 bg-red-950/30'
@@ -1188,12 +1323,23 @@ function TrackCueRow({
           />
           <button
             type="button"
-            disabled={!hasValidTrackId || metaStatus.state === 'loading'}
-            onClick={() => void runMetadataLookup(uriInput, true)}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-blue-500/40 bg-blue-950/50 px-3 py-1.5 text-xs font-bold text-blue-200 hover:bg-blue-900/60 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+            disabled={isSavingLocalFile}
+            onClick={() => fileInputRef.current?.click()}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/50 px-3 py-1.5 text-xs font-bold text-cyan-200 hover:bg-cyan-900/60 disabled:opacity-40 cursor-pointer"
           >
-            Hämta info
+            <FileAudio className="h-3.5 w-3.5" />
+            Välj lokal ljudfil...
           </button>
+          {!isLocalTrack && (
+            <button
+              type="button"
+              disabled={!hasValidTrackId || metaStatus.state === 'loading'}
+              onClick={() => void runMetadataLookup(uriInput, true)}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-blue-500/40 bg-blue-950/50 px-3 py-1.5 text-xs font-bold text-blue-200 hover:bg-blue-900/60 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+            >
+              Hämta info
+            </button>
+          )}
         </div>
         {uriError && <p className="mt-1 text-[11px] text-red-400">{uriError}</p>}
         {metaStatus.state !== 'idle' && (
@@ -1603,7 +1749,14 @@ function SoundPadEditor({
   const [metaStatus, setMetaStatus] = useState<MetadataLookupStatus>({
     state: 'idle',
   });
+  const [pendingLocalMeta, setPendingLocalMeta] = useState<{
+    trackUri: string;
+    fileName: string;
+    mimeType: string;
+  } | null>(null);
+  const [isSavingLocalFiles, setIsSavingLocalFiles] = useState(false);
 
+  const addFileInputRef = useRef<HTMLInputElement | null>(null);
   const fetchSeqRef = useRef(0);
   const latestTrackIdRef = useRef<string | null>(null);
   const lastAutoFetchedIdRef = useRef<string | null>(null);
@@ -1612,9 +1765,16 @@ function SoundPadEditor({
   const parsedPreview = newUrl.trim()
     ? tryParseSpotifyUri(newUrl)
     : null;
+  const isNewUrlLocal =
+    parsedPreview?.ok === true && isLocalAudioUri(parsedPreview.uri);
   const hasValidNewTrackId = extractSpotifyTrackId(newUrl) !== null;
 
   const runNewTrackMetadataLookup = async (rawInput: string, force: boolean) => {
+    if (isLocalAudioUri(rawInput)) {
+      latestTrackIdRef.current = null;
+      setMetaStatus({ state: 'idle' });
+      return;
+    }
     const trackId = extractSpotifyTrackId(rawInput);
     if (!trackId) {
       latestTrackIdRef.current = null;
@@ -1670,9 +1830,79 @@ function SoundPadEditor({
     }
   };
 
+  const handleNewLocalFilesSelected = async (
+    e: ChangeEvent<HTMLInputElement>,
+  ) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) {
+      return;
+    }
+    const files = Array.from(fileList);
+    e.target.value = '';
+
+    setIsSavingLocalFiles(true);
+    setFormError(null);
+    latestTrackIdRef.current = null;
+    lastAutoFetchedIdRef.current = null;
+    fetchSeqRef.current += 1;
+
+    try {
+      if (files.length === 1) {
+        const saved = await saveLocalAudioFile(files[0]);
+        setNewUrl(saved.trackUri);
+        setNewTitle(saved.title);
+        setNewArtist(saved.artist);
+        setPendingLocalMeta({
+          trackUri: saved.trackUri,
+          fileName: saved.fileName,
+          mimeType: saved.mimeType,
+        });
+        userEditedMetaRef.current = false;
+        setMetaStatus({
+          state: 'success',
+          message: `Lokal ljudfil vald: ${saved.fileName}`,
+        });
+      } else {
+        const startTimeMs = isValidMmSs(newMmSs)
+          ? parseTimeMmSsToMs(newMmSs)
+          : 0;
+        let addedCount = 0;
+        for (const file of files) {
+          const saved = await saveLocalAudioFile(file);
+          addTrackToPad(pad.id, {
+            trackUri: saved.trackUri,
+            title: saved.title,
+            artist: saved.artist,
+            startTimeMs,
+            sourceType: 'local',
+            localFileName: saved.fileName,
+            mimeType: saved.mimeType,
+          });
+          addedCount += 1;
+        }
+        setNewUrl('');
+        setNewTitle('');
+        setNewArtist('');
+        setPendingLocalMeta(null);
+        userEditedMetaRef.current = false;
+        setMetaStatus({
+          state: 'success',
+          message: `Lade till ${addedCount} lokala ljudfiler i poolen.`,
+        });
+      }
+    } catch {
+      setFormError('Kunde inte spara vald lokal ljudfil i webbläsaren.');
+    } finally {
+      setIsSavingLocalFiles(false);
+    }
+  };
+
   const handleNewUrlChange = (raw: string) => {
     setNewUrl(raw);
     setFormError(null);
+    if (pendingLocalMeta && raw.trim() !== pendingLocalMeta.trackUri) {
+      setPendingLocalMeta(null);
+    }
     const trackId = extractSpotifyTrackId(raw);
     if (!trackId) {
       latestTrackIdRef.current = null;
@@ -1695,11 +1925,24 @@ function SoundPadEditor({
       return;
     }
 
+    const isLocal = isLocalAudioUri(uriRes.uri);
+    const localMeta =
+      isLocal && pendingLocalMeta?.trackUri === uriRes.uri
+        ? pendingLocalMeta
+        : null;
+
     addTrackToPad(pad.id, {
       trackUri: uriRes.uri,
-      title: newTitle.trim() || 'Ny Spotify-låt',
+      title: newTitle.trim() || (isLocal ? 'Lokal ljudfil' : 'Ny Spotify-låt'),
       artist: newArtist.trim(),
       startTimeMs: parseTimeMmSsToMs(newMmSs),
+      sourceType: isLocal ? 'local' : 'spotify',
+      ...(localMeta
+        ? {
+            localFileName: localMeta.fileName,
+            mimeType: localMeta.mimeType,
+          }
+        : {}),
     });
 
     setNewUrl('');
@@ -1707,6 +1950,7 @@ function SoundPadEditor({
     setNewArtist('');
     setNewMmSs('00:00');
     setFormError(null);
+    setPendingLocalMeta(null);
     latestTrackIdRef.current = null;
     lastAutoFetchedIdRef.current = null;
     userEditedMetaRef.current = false;
@@ -1887,8 +2131,27 @@ function SoundPadEditor({
 
         {/* Add Track to Pool */}
         <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/60 p-3 space-y-2.5">
-          <div className="text-xs font-bold text-slate-300">
-            + Lägg till låt i poolen
+          <input
+            ref={addFileInputRef}
+            type="file"
+            multiple
+            accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac,.webm"
+            onChange={(e) => void handleNewLocalFilesSelected(e)}
+            className="hidden"
+          />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-bold text-slate-300">
+              + Lägg till låt i poolen
+            </div>
+            <button
+              type="button"
+              disabled={isSavingLocalFiles}
+              onClick={() => addFileInputRef.current?.click()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/50 px-3 py-1.5 text-xs font-bold text-cyan-200 hover:bg-cyan-900/60 disabled:opacity-40 cursor-pointer"
+            >
+              <FileAudio className="h-3.5 w-3.5" />
+              Välj lokal ljudfil...
+            </button>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-[1.8fr_1fr_1fr_100px] gap-2">
             <div className="flex items-center gap-1.5">
@@ -1896,17 +2159,19 @@ function SoundPadEditor({
                 type="text"
                 value={newUrl}
                 onChange={(e) => handleNewUrlChange(e.target.value)}
-                placeholder="Klistra in Spotify-länk eller URI..."
+                placeholder="Spotify-länk, URI eller lokal ljudfil (local:audio:...)"
                 className="flex-1 min-w-0 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-mono text-white placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
               />
-              <button
-                type="button"
-                disabled={!hasValidNewTrackId || metaStatus.state === 'loading'}
-                onClick={() => void runNewTrackMetadataLookup(newUrl, true)}
-                className="inline-flex shrink-0 items-center rounded-lg border border-blue-500/40 bg-blue-950/50 px-2.5 py-2 text-xs font-bold text-blue-200 hover:bg-blue-900/60 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-              >
-                Hämta info
-              </button>
+              {!isNewUrlLocal && (
+                <button
+                  type="button"
+                  disabled={!hasValidNewTrackId || metaStatus.state === 'loading'}
+                  onClick={() => void runNewTrackMetadataLookup(newUrl, true)}
+                  className="inline-flex shrink-0 items-center rounded-lg border border-blue-500/40 bg-blue-950/50 px-2.5 py-2 text-xs font-bold text-blue-200 hover:bg-blue-900/60 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  Hämta info
+                </button>
+              )}
             </div>
             <input
               type="text"
@@ -1942,10 +2207,20 @@ function SoundPadEditor({
 
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-3 text-xs">
-              {parsedPreview?.ok && (
-                <span className="text-emerald-400 font-mono">
-                  Konverterad URI: {parsedPreview.uri}
+              {isNewUrlLocal ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/40 bg-cyan-950/60 px-2.5 py-0.5 text-[11px] font-bold text-cyan-200">
+                  <FileAudio className="h-3.5 w-3.5 shrink-0" />
+                  Lokal ljudfil:{' '}
+                  {pendingLocalMeta?.fileName ||
+                    newTitle.trim() ||
+                    parsedPreview?.uri}
                 </span>
+              ) : (
+                parsedPreview?.ok && (
+                  <span className="text-emerald-400 font-mono">
+                    Konverterad URI: {parsedPreview.uri}
+                  </span>
+                )
               )}
               <MetadataStatusLine status={metaStatus} />
               {formError && <span className="text-red-400">{formError}</span>}

@@ -24,12 +24,14 @@ import type {
   SoundPad,
   Team,
   TrackCue,
+  TrackSourceType,
 } from '../types/models.ts';
 
 const SPOTIFY_ID_REGEX = /^[A-Za-z0-9]{22}$/;
 const SPOTIFY_URI_REGEX = /^spotify:track:([A-Za-z0-9]{22})$/;
 const SPOTIFY_URL_REGEX =
   /^https?:\/\/open\.spotify\.com\/(?:intl-[A-Za-z0-9-]+\/)?track\/([A-Za-z0-9]{22})(?:[/?#].*)?$/i;
+export const LOCAL_AUDIO_URI_REGEX = /^local:audio:([A-Za-z0-9_-]{3,120})$/;
 const MM_SS_REGEX = /^\d+:[0-5]\d$/;
 const HEX_COLOR_REGEX = /^#[0-9a-fA-F]{6}$/;
 const PKCE_CHARSET =
@@ -493,12 +495,91 @@ export function parseSpotifyMetadataPayload(
   return null;
 }
 
+export function isLocalAudioUri(input: string): boolean {
+  if (typeof input !== 'string') {
+    return false;
+  }
+  return LOCAL_AUDIO_URI_REGEX.test(input.trim());
+}
+
+export function createLocalAudioUri(id?: string): string {
+  if (typeof id === 'string') {
+    const trimmed = id.trim();
+    if (LOCAL_AUDIO_URI_REGEX.test(trimmed)) {
+      return trimmed;
+    }
+    const sanitized = trimmed
+      .replace(/[^A-Za-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 120);
+    if (sanitized.length >= 3) {
+      return `local:audio:${sanitized}`;
+    }
+  }
+
+  const timePart = Date.now().toString(36);
+  let randomPart = '';
+  if (
+    typeof globalThis.crypto !== 'undefined' &&
+    typeof globalThis.crypto.getRandomValues === 'function'
+  ) {
+    const bytes = new Uint8Array(6);
+    globalThis.crypto.getRandomValues(bytes);
+    randomPart = Array.from(bytes, (b) => b.toString(36).padStart(2, '0'))
+      .join('')
+      .slice(0, 8);
+  } else {
+    randomPart = Math.random().toString(36).slice(2, 10);
+  }
+
+  return `local:audio:${timePart}_${randomPart || 'track'}`;
+}
+
+export function parseLocalAudioFilename(fileName: string): {
+  title: string;
+  artist: string;
+} {
+  const rawBase =
+    typeof fileName === 'string'
+      ? (fileName.split(/[\\/]/).pop() ?? '')
+      : '';
+  const withoutExtension = rawBase.trim().replace(/\.[A-Za-z0-9]{2,5}$/, '');
+  const cleaned = withoutExtension
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) {
+    return {
+      title: 'Lokal ljudfil',
+      artist: 'Lokal ljudfil',
+    };
+  }
+
+  const sepMatch = /^(.+?)\s+[-–]\s+(.+)$/.exec(cleaned);
+  if (sepMatch) {
+    const artist = sepMatch[1].trim();
+    const title = sepMatch[2].trim();
+    if (artist && title) {
+      return { title, artist };
+    }
+  }
+
+  return {
+    title: cleaned,
+    artist: 'Lokal ljudfil',
+  };
+}
+
 export function tryParseSpotifyUri(
   input: string,
 ): { ok: true; uri: string } | { ok: false; error: string } {
   const trimmed = typeof input === 'string' ? input.trim() : '';
   if (!trimmed) {
-    return { ok: false, error: 'Spotify-länk eller URI får inte vara tom.' };
+    return {
+      ok: false,
+      error: 'Spotify-länk, URI eller lokal ljud-URI får inte vara tom.',
+    };
   }
 
   const trackId = extractSpotifyTrackId(trimmed);
@@ -506,10 +587,14 @@ export function tryParseSpotifyUri(
     return { ok: true, uri: `spotify:track:${trackId}` };
   }
 
+  if (isLocalAudioUri(trimmed)) {
+    return { ok: true, uri: trimmed };
+  }
+
   return {
     ok: false,
     error:
-      'Ogiltig Spotify-länk. Ange spotify:track:<id> eller en giltig https://open.spotify.com/track/...-länk.',
+      'Ogiltig ljudlänk. Ange spotify:track:<id>, https://open.spotify.com/track/... eller local:audio:<id>.',
   };
 }
 
@@ -1292,11 +1377,23 @@ function sanitizeTrackCue(rawTrack: unknown): TrackCue | null {
     0,
   );
 
+  const isLocal = isLocalAudioUri(parsedUri.uri);
+  const sourceType: TrackSourceType | undefined = isLocal
+    ? 'local'
+    : rawTrack.sourceType === 'spotify'
+      ? 'spotify'
+      : undefined;
+  const localFileName = isLocal ? nonEmptyString(rawTrack.localFileName) : null;
+  const mimeType = isLocal ? nonEmptyString(rawTrack.mimeType) : null;
+
   return {
     trackUri: parsedUri.uri,
     title,
     artist,
     startTimeMs: Math.round(startTimeMs),
+    ...(sourceType ? { sourceType } : {}),
+    ...(localFileName ? { localFileName } : {}),
+    ...(mimeType ? { mimeType } : {}),
   };
 }
 

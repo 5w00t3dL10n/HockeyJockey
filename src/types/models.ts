@@ -10,11 +10,16 @@ export interface Team {
   roster: Record<string, string>; // Key: tröjnummer, Value: spelarnamn
 }
 
+export type TrackSourceType = 'spotify' | 'local';
+
 export interface TrackCue {
-  trackUri: string; // "spotify:track:..."
+  trackUri: string; // "spotify:track:..." eller "local:audio:..."
   title: string;
   artist: string;
   startTimeMs: number;
+  sourceType?: TrackSourceType;
+  localFileName?: string;
+  mimeType?: string;
 }
 
 export type BuiltinPadCategory =

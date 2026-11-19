@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, AND section 4 of 11_oracle_custom_soundboard_groups_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, AND section 4.2 of 13_oracle_local_audio_files_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
@@ -17,6 +17,9 @@ Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 
 13. `SpotifyPlayerService.discoverConnectDevice()` & `'connect'` transport (`playTrack` 404->transfer/discovery->204 retry, `pause`, throttled `setVolume`).
 14. Zustand `useAppStore` custom `SoundboardGroup` CRUD (`addSoundboardGroup`, `updateSoundboardGroup`, `moveSoundboardGroup`, `deleteSoundboardGroup` with safe pad fallback migration).
 15. Zustand `useAppStore` `MatchProfile` switching across profiles with distinct custom `soundboardGroups` and full JSON export/import round-trip (`exportConfigJson` -> `importConfigJson`).
+16. `localAudioStorage` CRUD & playback URL caching (`saveLocalAudioFile`, `getLocalAudioRecord`, `getLocalAudioPlaybackUrl`, `listLocalAudioFiles`, `deleteLocalAudioFile`).
+17. `AudioController.playAt()` with local audio file (`local:audio:...`), volume ramps (`duckVolume`, `restoreVolume`, `fadeOutAndPause`, `hardStop`), and Spotify `setVolume` isolation.
+18. Zustand `useAppStore` full JSON export/import round-trip with local audio tracks (`sourceType: 'local'`, `localFileName`, `mimeType`).
 
 Deterministic exit codes:
 - 0: All oracle checks passed.
@@ -2115,6 +2118,627 @@ console.log(JSON.stringify({
         raise AssertionError("Activating Profile B after JSON import did not restore identical groups and pads")
 
 
+def check_local_audio_storage() -> None:
+    """Oracle 16: Verify localAudioStorage CRUD, metadata parsing, MIME inference, and playback URL caching."""
+    script = """
+import { isLocalAudioUri } from './src/utils/domain.ts';
+import {
+  deleteLocalAudioFile,
+  getLocalAudioPlaybackUrl,
+  getLocalAudioRecord,
+  listLocalAudioFiles,
+  saveLocalAudioFile,
+} from './src/services/localAudioStorage.ts';
+
+const bytesA = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+const bytesB = new Uint8Array([82, 73, 70, 70, 36, 0, 0, 0]);
+
+const metaA = await saveLocalAudioFile(
+  {
+    name: 'Zombie Nation - Kernkraft 400.mp3',
+    type: 'audio/mpeg',
+    size: bytesA.byteLength,
+    arrayBuffer: async () => bytesA.buffer.slice(0),
+  },
+  'local:audio:oracle_local_kernkraft',
+);
+
+const metaB = await saveLocalAudioFile({
+  name: 'Goal_Horn_Sundsvall.wav',
+  arrayBuffer: async () => bytesB.buffer.slice(0),
+});
+
+try {
+  const recordA = await getLocalAudioRecord(metaA.trackUri);
+  const recordB = await getLocalAudioRecord(metaB.trackUri);
+  const invalidRecord = await getLocalAudioRecord('spotify:track:4uLU6hMCjMI75M1A2tKUQC');
+
+  const urlA1 = await getLocalAudioPlaybackUrl(metaA.trackUri);
+  const urlA2 = await getLocalAudioPlaybackUrl(metaA.trackUri);
+  const urlB = await getLocalAudioPlaybackUrl(metaB.trackUri);
+  const missingUrl = await getLocalAudioPlaybackUrl('local:audio:does_not_exist_999');
+
+  const listedBeforeDelete = await listLocalAudioFiles();
+
+  await deleteLocalAudioFile(metaA.trackUri);
+
+  const recordAAfterDelete = await getLocalAudioRecord(metaA.trackUri);
+  const urlAAfterDelete = await getLocalAudioPlaybackUrl(metaA.trackUri);
+  const listedAfterDelete = await listLocalAudioFiles();
+
+  const getByteLen = (rec) => {
+    if (!rec || !rec.data) return -1;
+    if (rec.data instanceof ArrayBuffer) return rec.data.byteLength;
+    if (ArrayBuffer.isView(rec.data)) return rec.data.byteLength;
+    if (typeof Blob !== 'undefined' && rec.data instanceof Blob) return rec.data.size;
+    return -1;
+  };
+
+  console.log(JSON.stringify({
+    metaA,
+    metaB,
+    metaAUriValid: isLocalAudioUri(metaA.trackUri),
+    metaBUriValid: isLocalAudioUri(metaB.trackUri),
+    recordAInfo: recordA
+      ? {
+          trackUri: recordA.trackUri,
+          fileName: recordA.fileName,
+          mimeType: recordA.mimeType,
+          sizeBytes: recordA.sizeBytes,
+          createdAt: recordA.createdAt,
+          dataByteLength: getByteLen(recordA),
+        }
+      : null,
+    recordBInfo: recordB
+      ? {
+          trackUri: recordB.trackUri,
+          fileName: recordB.fileName,
+          mimeType: recordB.mimeType,
+          sizeBytes: recordB.sizeBytes,
+          createdAt: recordB.createdAt,
+          dataByteLength: getByteLen(recordB),
+        }
+      : null,
+    invalidRecord,
+    urlA1,
+    urlA2,
+    urlB,
+    missingUrl,
+    listedBeforeDeleteHasDataKey: listedBeforeDelete.some((item) => 'data' in item),
+    listedBeforeDelete,
+    recordAAfterDelete,
+    urlAAfterDelete,
+    listedAfterDelete,
+  }));
+} finally {
+  await deleteLocalAudioFile(metaA.trackUri);
+  await deleteLocalAudioFile(metaB.trackUri);
+}
+"""
+    res = run_ts_script(script)
+
+    meta_a = res["metaA"]
+    meta_b = res["metaB"]
+    if not res["metaAUriValid"] or not res["metaBUriValid"]:
+        raise AssertionError(f"Saved local audio URIs are invalid: A={meta_a}, B={meta_b}")
+
+    if meta_a != {
+        "trackUri": "local:audio:oracle_local_kernkraft",
+        "fileName": "Zombie Nation - Kernkraft 400.mp3",
+        "mimeType": "audio/mpeg",
+        "title": "Kernkraft 400",
+        "artist": "Zombie Nation",
+    }:
+        raise AssertionError(f"Unexpected saveLocalAudioFile metadata for A: {meta_a!r}")
+
+    if (
+        meta_b["fileName"] != "Goal_Horn_Sundsvall.wav"
+        or meta_b["mimeType"] != "audio/wav"
+        or meta_b["title"] != "Goal Horn Sundsvall"
+        or meta_b["artist"] != "Lokal ljudfil"
+    ):
+        raise AssertionError(f"Unexpected saveLocalAudioFile metadata/MIME inference for B: {meta_b!r}")
+
+    rec_a = res["recordAInfo"]
+    rec_b = res["recordBInfo"]
+    if (
+        not rec_a
+        or rec_a["trackUri"] != meta_a["trackUri"]
+        or rec_a["fileName"] != "Zombie Nation - Kernkraft 400.mp3"
+        or rec_a["mimeType"] != "audio/mpeg"
+        or rec_a["sizeBytes"] != 16
+        or rec_a["dataByteLength"] != 16
+        or not rec_a["createdAt"]
+    ):
+        raise AssertionError(f"Unexpected getLocalAudioRecord for A: {rec_a!r}")
+
+    if (
+        not rec_b
+        or rec_b["trackUri"] != meta_b["trackUri"]
+        or rec_b["mimeType"] != "audio/wav"
+        or rec_b["sizeBytes"] != 8
+        or rec_b["dataByteLength"] != 8
+    ):
+        raise AssertionError(f"Unexpected getLocalAudioRecord for B: {rec_b!r}")
+
+    if res["invalidRecord"] is not None:
+        raise AssertionError(f"Expected null for non-local URI in getLocalAudioRecord, got {res['invalidRecord']!r}")
+
+    if (
+        not isinstance(res["urlA1"], str)
+        or not res["urlA1"].startswith("blob:")
+        or res["urlA1"] != res["urlA2"]
+    ):
+        raise AssertionError(f"Expected cached blob: playback URL for A, got {res['urlA1']!r} / {res['urlA2']!r}")
+
+    if not isinstance(res["urlB"], str) or not res["urlB"].startswith("blob:"):
+        raise AssertionError(f"Expected blob: playback URL for B, got {res['urlB']!r}")
+
+    if res["missingUrl"] is not None:
+        raise AssertionError(f"Expected null playback URL for missing URI, got {res['missingUrl']!r}")
+
+    if res["listedBeforeDeleteHasDataKey"]:
+        raise AssertionError("listLocalAudioFiles must strip binary `data` property from records")
+
+    uris_before = {item["trackUri"] for item in res["listedBeforeDelete"]}
+    if meta_a["trackUri"] not in uris_before or meta_b["trackUri"] not in uris_before:
+        raise AssertionError(f"listLocalAudioFiles missing saved entries: {uris_before!r}")
+
+    if res["recordAAfterDelete"] is not None or res["urlAAfterDelete"] is not None:
+        raise AssertionError("deleteLocalAudioFile did not clear record and cached playback URL")
+
+    uris_after = {item["trackUri"] for item in res["listedAfterDelete"]}
+    if meta_a["trackUri"] in uris_after or meta_b["trackUri"] not in uris_after:
+        raise AssertionError(f"listLocalAudioFiles mismatch after delete: {uris_after!r}")
+
+
+def check_audio_controller_local_audio_and_ramps() -> None:
+    """Oracle 17: Verify AudioController.playAt() with local audio, volume ramps, hardStop, and Spotify setVolume isolation."""
+    script = """
+import { AudioController } from './src/services/audioController.ts';
+import {
+  deleteLocalAudioFile,
+  getLocalAudioPlaybackUrl,
+  saveLocalAudioFile,
+} from './src/services/localAudioStorage.ts';
+
+const hadOriginalAudio = 'Audio' in globalThis;
+const originalAudio = globalThis.Audio;
+
+const createdAudioInstances = [];
+
+class MockHTMLAudioElement {
+  constructor(src) {
+    this.src = src;
+    this._volume = 1.0;
+    this.volumeHistory = [];
+    this.currentTime = 0;
+    this.duration = 120;
+    this.readyState = 1;
+    this.paused = true;
+    this.playCalls = 0;
+    this.pauseCalls = 0;
+    this.loadCalls = 0;
+    this.removedAttributes = [];
+    this.listeners = new Map();
+    createdAudioInstances.push(this);
+  }
+  get volume() {
+    return this._volume;
+  }
+  set volume(v) {
+    this._volume = v;
+    this.volumeHistory.push(v);
+  }
+  addEventListener(event, handler) {
+    if (!this.listeners.has(event)) {
+      this.listeners.set(event, new Set());
+    }
+    this.listeners.get(event).add(handler);
+  }
+  removeEventListener(event, handler) {
+    this.listeners.get(event)?.delete(handler);
+  }
+  async play() {
+    this.paused = false;
+    this.playCalls += 1;
+  }
+  pause() {
+    this.paused = true;
+    this.pauseCalls += 1;
+  }
+  removeAttribute(name) {
+    this.removedAttributes.push(name);
+    if (name === 'src') {
+      this.src = '';
+    }
+  }
+  load() {
+    this.loadCalls += 1;
+  }
+}
+
+globalThis.Audio = MockHTMLAudioElement;
+
+const savedMeta = await saveLocalAudioFile(
+  {
+    name: 'Zombie Nation - Kernkraft 400.mp3',
+    type: 'audio/mpeg',
+    size: 12,
+    arrayBuffer: async () => new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer,
+  },
+  'local:audio:oracle_controller_local',
+);
+const expectedPlaybackUrl = await getLocalAudioPlaybackUrl(savedMeta.trackUri);
+
+const spotifyPlayCalls = [];
+const spotifyVolumeCalls = [];
+let spotifyPauseCalls = 0;
+
+const mockSpotifyAdapter = {
+  isReady: () => true,
+  getDeviceId: () => 'spotify-connect-dev-1',
+  getDeviceName: () => 'Spotify Desktop',
+  playTrack: async (uri, pos) => {
+    spotifyPlayCalls.push({ uri, pos });
+  },
+  pause: async () => {
+    spotifyPauseCalls += 1;
+  },
+  setVolume: async (vol) => {
+    spotifyVolumeCalls.push(vol);
+  },
+};
+
+const controller = new AudioController(mockSpotifyAdapter);
+
+try {
+  // 1. Play local audio track at 15000ms, targetVolume 0.9
+  await controller.playAt(
+    savedMeta.trackUri,
+    15000,
+    0.9,
+    undefined,
+    {
+      title: savedMeta.title,
+      artist: savedMeta.artist,
+      sourceType: 'local',
+      localFileName: savedMeta.fileName,
+      mimeType: savedMeta.mimeType,
+    },
+  );
+  const stateAfterPlay = controller.getState();
+  const volHistoryAfterPlay = [...createdAudioInstances[0].volumeHistory];
+  const initialAudioPos = createdAudioInstances[0].currentTime;
+  const spotifyPauseAfterPlay1 = spotifyPauseCalls;
+
+  // 2. Duck volume to 0.2 (150ms ramp) -> must ramp HTMLAudioElement only, NEVER Spotify setVolume
+  await controller.duckVolume(0.2, 150);
+  const stateAfterDuck = controller.getState();
+  const audioVolAfterDuck = createdAudioInstances[0].volume;
+
+  // 3. Restore volume to 0.95 (150ms ramp) -> must ramp HTMLAudioElement only, NEVER Spotify setVolume
+  await controller.restoreVolume(0.95, 150);
+  const stateAfterRestore = controller.getState();
+  const audioVolAfterRestore = createdAudioInstances[0].volume;
+
+  // 4. Fade out and pause (150ms ramp) -> must pause HTMLAudioElement and NOT call Spotify pause/setVolume
+  await controller.fadeOutAndPause(150);
+  const stateAfterFadeOut = controller.getState();
+  const spotifyPauseAfterFadeOut = spotifyPauseCalls;
+  const firstAudioSnapshot = {
+    paused: createdAudioInstances[0].paused,
+    playCalls: createdAudioInstances[0].playCalls,
+    pauseCalls: createdAudioInstances[0].pauseCalls,
+    loadCalls: createdAudioInstances[0].loadCalls,
+    removedAttributes: createdAudioInstances[0].removedAttributes,
+    volumeHistory: createdAudioInstances[0].volumeHistory,
+    finalVolume: createdAudioInstances[0].volume,
+  };
+
+  // 5. Play again and hardStop()
+  await controller.playAt(savedMeta.trackUri, 0, 0.85, undefined, {
+    title: savedMeta.title,
+    artist: savedMeta.artist,
+    sourceType: 'local',
+    localFileName: savedMeta.fileName,
+    mimeType: savedMeta.mimeType,
+  });
+  const spotifyPauseAfterPlay2 = spotifyPauseCalls;
+  await controller.hardStop();
+  const stateAfterHardStop = controller.getState();
+  const spotifyPauseAfterHardStop = spotifyPauseCalls;
+  const secondAudioSnapshot = {
+    paused: createdAudioInstances[1].paused,
+    playCalls: createdAudioInstances[1].playCalls,
+    pauseCalls: createdAudioInstances[1].pauseCalls,
+    loadCalls: createdAudioInstances[1].loadCalls,
+    removedAttributes: createdAudioInstances[1].removedAttributes,
+  };
+
+  // 6. Missing local audio URI graceful fallback (must still never touch Spotify adapter setVolume/playTrack)
+  await controller.playAt('local:audio:missing_oracle_file', 0, 1.0, undefined, {
+    title: 'Saknad lokal fil',
+    artist: 'Lokal ljudfil',
+    sourceType: 'local',
+  });
+  const stateAfterMissing = controller.getState();
+  await controller.hardStop();
+
+  console.log(JSON.stringify({
+    expectedPlaybackUrl,
+    audioSrc0: createdAudioInstances[0] ? expectedPlaybackUrl : null,
+    audioCount: createdAudioInstances.length,
+    spotifyPlayCalls,
+    spotifyVolumeCalls,
+    spotifyPauseAfterPlay1,
+    spotifyPauseAfterFadeOut,
+    spotifyPauseAfterPlay2,
+    spotifyPauseAfterHardStop,
+    initialAudioPos,
+    volHistoryAfterPlay,
+    stateAfterPlay,
+    stateAfterDuck,
+    audioVolAfterDuck,
+    stateAfterRestore,
+    audioVolAfterRestore,
+    stateAfterFadeOut,
+    firstAudioSnapshot,
+    stateAfterHardStop,
+    secondAudioSnapshot,
+    stateAfterMissing,
+  }));
+} finally {
+  controller.dispose();
+  await deleteLocalAudioFile(savedMeta.trackUri);
+  if (hadOriginalAudio) {
+    globalThis.Audio = originalAudio;
+  } else {
+    delete globalThis.Audio;
+  }
+}
+"""
+    res = run_ts_script(script, timeout=30)
+
+    if res["spotifyPlayCalls"]:
+        raise AssertionError(
+            f"Spotify playTrack() must NEVER be called for local audio files: {res['spotifyPlayCalls']!r}"
+        )
+    if res["spotifyVolumeCalls"]:
+        raise AssertionError(
+            f"Spotify setVolume() must NEVER be called during local audio playback/ducking/fade: {res['spotifyVolumeCalls']!r}"
+        )
+    if res["spotifyPauseAfterPlay1"] != 1:
+        raise AssertionError(
+            f"Expected Spotify pause() once when switching from ready Spotify to local audio, got {res['spotifyPauseAfterPlay1']}"
+        )
+    if res["spotifyPauseAfterFadeOut"] != 1:
+        raise AssertionError(
+            f"fadeOutAndPause() on local audio must NOT call Spotify pause(): count={res['spotifyPauseAfterFadeOut']}"
+        )
+    if res["spotifyPauseAfterPlay2"] != 2 or res["spotifyPauseAfterHardStop"] != 2:
+        raise AssertionError(
+            f"Unexpected Spotify pause() counts on 2nd local play + hardStop: {res['spotifyPauseAfterPlay2']}, {res['spotifyPauseAfterHardStop']}"
+        )
+
+    if res["audioCount"] != 2:
+        raise AssertionError(f"Expected 2 MockHTMLAudioElement instances, got {res['audioCount']}")
+    if abs(res["initialAudioPos"] - 15.0) > 1e-6:
+        raise AssertionError(f"Expected local audio seek to 15.0s, got {res['initialAudioPos']}")
+
+    s_play = res["stateAfterPlay"]
+    track_play = s_play.get("currentTrack") or {}
+    if (
+        s_play["isPlaying"] is not True
+        or s_play["isDucked"] is not False
+        or abs(s_play["volume"] - 0.9) > 1e-6
+        or s_play["positionMs"] != 15000
+        or s_play["error"] is not None
+        or track_play.get("trackUri") != "local:audio:oracle_controller_local"
+        or track_play.get("sourceType") != "local"
+        or track_play.get("localFileName") != "Zombie Nation - Kernkraft 400.mp3"
+        or track_play.get("mimeType") != "audio/mpeg"
+    ):
+        raise AssertionError(f"Unexpected AudioController state after local playAt: {s_play!r}")
+
+    s_duck = res["stateAfterDuck"]
+    if (
+        s_duck["isPlaying"] is not True
+        or s_duck["isDucked"] is not True
+        or abs(s_duck["volume"] - 0.2) > 1e-6
+        or abs(res["audioVolAfterDuck"] - 0.2) > 1e-6
+    ):
+        raise AssertionError(f"Unexpected state after local duckVolume: {s_duck!r}, audioVol={res['audioVolAfterDuck']}")
+
+    s_restore = res["stateAfterRestore"]
+    if (
+        s_restore["isPlaying"] is not True
+        or s_restore["isDucked"] is not False
+        or abs(s_restore["volume"] - 0.95) > 1e-6
+        or abs(res["audioVolAfterRestore"] - 0.95) > 1e-6
+    ):
+        raise AssertionError(f"Unexpected state after local restoreVolume: {s_restore!r}, audioVol={res['audioVolAfterRestore']}")
+
+    s_fade = res["stateAfterFadeOut"]
+    first_audio = res["firstAudioSnapshot"]
+    if (
+        s_fade["isPlaying"] is not False
+        or s_fade["isDucked"] is not False
+        or abs(s_fade["volume"] - 0.0) > 1e-6
+        or first_audio["paused"] is not True
+        or first_audio["pauseCalls"] < 1
+        or first_audio["loadCalls"] < 1
+        or "src" not in first_audio["removedAttributes"]
+        or abs(first_audio["finalVolume"] - 0.0) > 1e-6
+        or len(first_audio["volumeHistory"]) < 5
+    ):
+        raise AssertionError(f"Unexpected state/audio after local fadeOutAndPause: state={s_fade!r}, audio={first_audio!r}")
+
+    s_stop = res["stateAfterHardStop"]
+    second_audio = res["secondAudioSnapshot"]
+    if (
+        s_stop["isPlaying"] is not False
+        or s_stop["isDucked"] is not False
+        or second_audio["paused"] is not True
+        or second_audio["pauseCalls"] < 1
+        or "src" not in second_audio["removedAttributes"]
+    ):
+        raise AssertionError(f"Unexpected state/audio after local hardStop: state={s_stop!r}, audio={second_audio!r}")
+
+    s_missing = res["stateAfterMissing"]
+    if (
+        s_missing["isPlaying"] is not True
+        or (s_missing["currentTrack"] or {}).get("sourceType") != "local"
+        or not isinstance(s_missing.get("error"), str)
+        or not s_missing["error"].strip()
+    ):
+        raise AssertionError(f"Unexpected fallback state for missing local audio file: {s_missing!r}")
+
+
+def check_store_local_audio_json_roundtrip() -> None:
+    """Oracle 18: Verify full useAppStore JSON export/import round-trip with local audio track metadata."""
+    script = """
+import { useAppStore } from './src/store/useAppStore.ts';
+
+useAppStore.getState().resetToDefaults();
+
+// Add a dedicated SoundPad with a local audio track and append a second local track to an existing pad
+useAppStore.getState().addSoundPad({
+  id: 'pad-local-goal-horn',
+  label: 'Lokalt Målhorn',
+  category: 'goal_home',
+  color: '#2563eb',
+  volume: 0.95,
+  triggerFlow: 'goal_home',
+  hotkey: 'Digit9',
+  tracks: [
+    {
+      trackUri: 'local:audio:oracle_goal_horn_1',
+      title: 'Kernkraft 400',
+      artist: 'Zombie Nation',
+      startTimeMs: 4500,
+      sourceType: 'local',
+      localFileName: 'Zombie Nation - Kernkraft 400.mp3',
+      mimeType: 'audio/mpeg',
+    },
+  ],
+});
+
+useAppStore.getState().addTrackToPad('pad-hype-1', {
+  trackUri: 'local:audio:oracle_hype_wav_2',
+  title: 'Goal Horn Sundsvall',
+  artist: 'Lokal ljudfil',
+  startTimeMs: 0,
+  sourceType: 'local',
+  localFileName: 'Goal_Horn_Sundsvall.wav',
+  mimeType: 'audio/wav',
+});
+
+const localProfileId = useAppStore.getState().saveCurrentAsMatchProfile(
+  'Lokal Ljudprofil',
+  'U16',
+  false,
+);
+
+function captureStoreSnapshot() {
+  const st = useAppStore.getState();
+  return {
+    teams: st.teams,
+    soundPads: st.soundPads,
+    settings: st.settings,
+    savedRosters: st.savedRosters,
+    matchProfiles: st.matchProfiles,
+    activeProfileId: st.activeProfileId,
+  };
+}
+
+const beforeExport = captureStoreSnapshot();
+const exportedJson = useAppStore.getState().exportConfigJson();
+const parsedExport = JSON.parse(exportedJson);
+
+useAppStore.getState().resetToDefaults();
+const wipedHasLocalPad = useAppStore.getState().soundPads.some((p) => p.id === 'pad-local-goal-horn');
+
+const importedReturn = useAppStore.getState().importConfigJson(exportedJson);
+const afterImport = captureStoreSnapshot();
+
+// Also switch away to default profile and back to localProfileId to verify profile track metadata preservation
+const actDefault = useAppStore.getState().activateMatchProfile('profile-u12-standard');
+const defaultHasLocalPad = useAppStore.getState().soundPads.some((p) => p.id === 'pad-local-goal-horn');
+const actLocalProfile = useAppStore.getState().activateMatchProfile(localProfileId);
+const afterReactivateProfile = captureStoreSnapshot();
+
+console.log(JSON.stringify({
+  localProfileId,
+  beforeExport,
+  parsedExport,
+  wipedHasLocalPad,
+  importedReturn: {
+    teams: importedReturn.teams,
+    soundPads: importedReturn.soundPads,
+    settings: importedReturn.settings,
+    savedRosters: importedReturn.savedRosters ?? [],
+    matchProfiles: importedReturn.matchProfiles ?? [],
+    activeProfileId: importedReturn.activeProfileId ?? null,
+  },
+  afterImport,
+  actDefault,
+  defaultHasLocalPad,
+  actLocalProfile,
+  afterReactivateProfile,
+}));
+"""
+    res = run_ts_script(script)
+
+    if res["wipedHasLocalPad"] is not False:
+        raise AssertionError("resetToDefaults did not clear pad-local-goal-horn before import check")
+
+    if not res["actDefault"] or res["defaultHasLocalPad"] is not False or not res["actLocalProfile"]:
+        raise AssertionError("MatchProfile switching check around local audio profile failed")
+
+    exported_pad = next(
+        (p for p in res["parsedExport"]["soundPads"] if p["id"] == "pad-local-goal-horn"),
+        None,
+    )
+    expected_track_1 = {
+        "trackUri": "local:audio:oracle_goal_horn_1",
+        "title": "Kernkraft 400",
+        "artist": "Zombie Nation",
+        "startTimeMs": 4500,
+        "sourceType": "local",
+        "localFileName": "Zombie Nation - Kernkraft 400.mp3",
+        "mimeType": "audio/mpeg",
+    }
+    expected_track_2 = {
+        "trackUri": "local:audio:oracle_hype_wav_2",
+        "title": "Goal Horn Sundsvall",
+        "artist": "Lokal ljudfil",
+        "startTimeMs": 0,
+        "sourceType": "local",
+        "localFileName": "Goal_Horn_Sundsvall.wav",
+        "mimeType": "audio/wav",
+    }
+    if not exported_pad or exported_pad["tracks"] != [expected_track_1]:
+        raise AssertionError(f"Exported JSON missing local audio track metadata: {exported_pad!r}")
+
+    before = res["beforeExport"]
+    for label, actual in (
+        ("importConfigJson return value", res["importedReturn"]),
+        ("store after importConfigJson", res["afterImport"]),
+        ("store after activateMatchProfile(localProfileId)", res["afterReactivateProfile"]),
+    ):
+        if actual != before:
+            raise AssertionError(f"Local audio store round-trip mismatch in {label}")
+
+    imported_pad = next((p for p in res["afterImport"]["soundPads"] if p["id"] == "pad-local-goal-horn"), None)
+    if not imported_pad or imported_pad["tracks"] != [expected_track_1]:
+        raise AssertionError(f"Imported pad-local-goal-horn mismatch: {imported_pad!r}")
+
+    imported_hype_pad = next((p for p in res["afterImport"]["soundPads"] if p["id"] == "pad-hype-1"), None)
+    if not imported_hype_pad or expected_track_2 not in imported_hype_pad["tracks"]:
+        raise AssertionError(f"Imported pad-hype-1 missing local WAV track: {imported_hype_pad!r}")
+
+
 def main() -> int:
     checks = [
         ("1. Production build & dist/ artifacts", check_production_build),
@@ -2132,6 +2756,9 @@ def main() -> int:
         ("13. SpotifyPlayerService.discoverConnectDevice() & 'connect' transport resilience", check_spotify_connect_discovery_and_transport),
         ("14. Store custom SoundboardGroup CRUD, ordering & safe pad fallback migration", check_store_custom_soundboard_groups_crud_and_migration),
         ("15. Store MatchProfile switching & JSON round-trip with custom soundboardGroups", check_store_custom_groups_profiles_and_json_roundtrip),
+        ("16. localAudioStorage CRUD, MIME inference & playback URL caching", check_local_audio_storage),
+        ("17. AudioController.playAt() with local audio, volume ramps & Spotify setVolume isolation", check_audio_controller_local_audio_and_ramps),
+        ("18. Store full JSON export/import round-trip with local audio tracks", check_store_local_audio_json_roundtrip),
     ]
 
     for label, fn in checks:

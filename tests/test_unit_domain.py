@@ -1375,6 +1375,284 @@ console.log(JSON.stringify({
         )
         self.assertEqual(res["legacyCustomPadCategory"], "period-break-mix")
 
+    def test_15_local_audio_uri_and_filename_parsing(self) -> None:
+        """Verify isLocalAudioUri, createLocalAudioUri, tryParseSpotifyUri/parseSpotifyUri, extractSpotifyTrackId(local), and parseLocalAudioFilename."""
+        script = """
+import {
+  createLocalAudioUri,
+  extractSpotifyTrackId,
+  isLocalAudioUri,
+  parseLocalAudioFilename,
+  parseSpotifyUri,
+  tryParseSpotifyUri,
+} from './src/utils/domain.ts';
+
+function expectThrows(fn) {
+  try {
+    fn();
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+const generatedA = createLocalAudioUri();
+const generatedB = createLocalAudioUri();
+
+const result = {
+  isValidSimple: isLocalAudioUri('local:audio:test_1'),
+  isValidTrimmed: isLocalAudioUri('  local:audio:goal-horn_01  '),
+  isInvalidTooShort: isLocalAudioUri('local:audio:ab'),
+  isInvalidSpaces: isLocalAudioUri('local:audio:bad space'),
+  isInvalidSpotify: isLocalAudioUri('spotify:track:4uLU6hMCjMI75M1A2tKUQC'),
+  isInvalidEmpty: isLocalAudioUri(''),
+  createdCustomId: createLocalAudioUri('horn_01'),
+  createdAlreadyUri: createLocalAudioUri('local:audio:already_valid'),
+  createdSanitized: createLocalAudioUri('Goal Horn! #1'),
+  generatedA,
+  generatedB,
+  generatedAValid: isLocalAudioUri(generatedA),
+  generatedBValid: isLocalAudioUri(generatedB),
+  tryLocalOk: tryParseSpotifyUri('local:audio:test_1'),
+  tryLocalTrimmedOk: tryParseSpotifyUri('  local:audio:horn-99  '),
+  tryLocalInvalid: tryParseSpotifyUri('local:audio:x'),
+  parseLocalOk: parseSpotifyUri('local:audio:test_1'),
+  parseLocalInvalidThrows: expectThrows(() => parseSpotifyUri('local:audio:x')),
+  extractLocalNull: extractSpotifyTrackId('local:audio:test_1'),
+  extractLocalTrimmedNull: extractSpotifyTrackId('  local:audio:goal_horn_1  '),
+  parsedArtistTitle: parseLocalAudioFilename('Zombie Nation - Kernkraft 400.mp3'),
+  parsedGoalHorn: parseLocalAudioFilename('Goal_Horn_Sundsvall.wav'),
+  parsedWindowsPath: parseLocalAudioFilename('C:\\\\Audio\\\\Arena_DJ - Power_Play.ogg'),
+  parsedEnDash: parseLocalAudioFilename('Track – Subtitle.m4a'),
+  parsedEmpty: parseLocalAudioFilename(''),
+};
+
+console.log(JSON.stringify(result));
+"""
+        res = run_ts_script(script)
+
+        self.assertTrue(res["isValidSimple"])
+        self.assertTrue(res["isValidTrimmed"])
+        self.assertFalse(res["isInvalidTooShort"])
+        self.assertFalse(res["isInvalidSpaces"])
+        self.assertFalse(res["isInvalidSpotify"])
+        self.assertFalse(res["isInvalidEmpty"])
+
+        self.assertEqual(res["createdCustomId"], "local:audio:horn_01")
+        self.assertEqual(res["createdAlreadyUri"], "local:audio:already_valid")
+        self.assertEqual(res["createdSanitized"], "local:audio:Goal-Horn-1")
+        self.assertTrue(res["generatedAValid"])
+        self.assertTrue(res["generatedBValid"])
+        self.assertTrue(res["generatedA"].startswith("local:audio:"))
+        self.assertTrue(res["generatedB"].startswith("local:audio:"))
+
+        self.assertEqual(res["tryLocalOk"], {"ok": True, "uri": "local:audio:test_1"})
+        self.assertEqual(res["tryLocalTrimmedOk"], {"ok": True, "uri": "local:audio:horn-99"})
+        self.assertFalse(res["tryLocalInvalid"]["ok"])
+        self.assertEqual(res["parseLocalOk"], "local:audio:test_1")
+        self.assertTrue(res["parseLocalInvalidThrows"])
+
+        self.assertIsNone(res["extractLocalNull"])
+        self.assertIsNone(res["extractLocalTrimmedNull"])
+
+        self.assertEqual(
+            res["parsedArtistTitle"],
+            {"title": "Kernkraft 400", "artist": "Zombie Nation"},
+        )
+        self.assertEqual(
+            res["parsedGoalHorn"],
+            {"title": "Goal Horn Sundsvall", "artist": "Lokal ljudfil"},
+        )
+        self.assertEqual(
+            res["parsedWindowsPath"],
+            {"title": "Power Play", "artist": "Arena DJ"},
+        )
+        self.assertEqual(
+            res["parsedEnDash"],
+            {"title": "Subtitle", "artist": "Track"},
+        )
+        self.assertEqual(
+            res["parsedEmpty"],
+            {"title": "Lokal ljudfil", "artist": "Lokal ljudfil"},
+        )
+
+    def test_16_sanitize_match_config_local_audio_tracks(self) -> None:
+        """Verify sanitizeMatchConfig preserves local audio metadata, explicit spotify sourceType, and omits sourceType on legacy/mismatched Spotify tracks."""
+        script = """
+import { sanitizeMatchConfig } from './src/utils/domain.ts';
+
+const rawConfig = {
+  version: 1,
+  soundPads: [
+    {
+      id: 'pad-local-goal',
+      label: 'Lokalt Målhorn',
+      category: 'goal_home',
+      color: '#2563eb',
+      volume: 0.95,
+      triggerFlow: 'goal_home',
+      tracks: [
+        {
+          trackUri: 'local:audio:horn_01',
+          title: 'Goal Horn Sundsvall',
+          artist: 'Lokal ljudfil',
+          startTimeMs: 1200,
+          sourceType: 'local',
+          localFileName: 'Goal_Horn_Sundsvall.wav',
+          mimeType: 'audio/wav',
+        },
+        {
+          trackUri: 'local:audio:kernkraft_400',
+          title: 'Kernkraft 400',
+          artist: 'Zombie Nation',
+          startTimeMs: 45000,
+          sourceType: 'spotify',
+          localFileName: 'Zombie Nation - Kernkraft 400.mp3',
+          mimeType: 'audio/mpeg',
+        },
+        {
+          trackUri: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+          title: 'Spotify Legacy Track',
+          artist: 'Arena Band',
+          startTimeMs: 0,
+        },
+        {
+          trackUri: 'spotify:track:2KH16WveTQWT6KOG9Rg6e2',
+          title: 'Spotify Explicit Track',
+          artist: 'Survivor',
+          startTimeMs: 42000,
+          sourceType: 'spotify',
+        },
+        {
+          trackUri: 'spotify:track:5CQ30WqJwcep0pYcV4AMNc',
+          title: 'Spotify Mismatched SourceType',
+          artist: 'House of Pain',
+          startTimeMs: 18000,
+          sourceType: 'local',
+          localFileName: 'should_not_persist.mp3',
+          mimeType: 'audio/mpeg',
+        },
+      ],
+    },
+  ],
+  matchProfiles: [
+    {
+      id: 'prof-local-audio',
+      name: 'Profil med lokalt ljud',
+      soundPads: [
+        {
+          id: 'prof-pad-local',
+          label: 'Profil Lokal Jingle',
+          category: 'hype',
+          color: '#059669',
+          volume: 0.9,
+          triggerFlow: null,
+          tracks: [
+            {
+              trackUri: 'local:audio:profile_horn_99',
+              title: 'Period Jingle',
+              artist: 'Arena Audio',
+              startTimeMs: 500,
+              sourceType: 'local',
+              localFileName: 'Period_Jingle.ogg',
+              mimeType: 'audio/ogg',
+            },
+          ],
+        },
+      ],
+      updatedAt: '2026-11-19T12:00:00.000Z',
+    },
+  ],
+};
+
+const sanitized = sanitizeMatchConfig(rawConfig);
+const sanitizedFromEnvelope = sanitizeMatchConfig({ state: rawConfig, version: 1 });
+
+console.log(JSON.stringify({
+  sanitized,
+  sanitizedFromEnvelope,
+}));
+"""
+        res = run_ts_script(script)
+        cfg = res["sanitized"]
+        self.assertEqual(res["sanitizedFromEnvelope"], cfg)
+
+        tracks = cfg["soundPads"][0]["tracks"]
+        self.assertEqual(len(tracks), 5)
+
+        self.assertEqual(
+            tracks[0],
+            {
+                "trackUri": "local:audio:horn_01",
+                "title": "Goal Horn Sundsvall",
+                "artist": "Lokal ljudfil",
+                "startTimeMs": 1200,
+                "sourceType": "local",
+                "localFileName": "Goal_Horn_Sundsvall.wav",
+                "mimeType": "audio/wav",
+            },
+        )
+        self.assertEqual(
+            tracks[1],
+            {
+                "trackUri": "local:audio:kernkraft_400",
+                "title": "Kernkraft 400",
+                "artist": "Zombie Nation",
+                "startTimeMs": 45000,
+                "sourceType": "local",
+                "localFileName": "Zombie Nation - Kernkraft 400.mp3",
+                "mimeType": "audio/mpeg",
+            },
+        )
+        self.assertEqual(
+            tracks[2],
+            {
+                "trackUri": "spotify:track:4uLU6hMCjMI75M1A2tKUQC",
+                "title": "Spotify Legacy Track",
+                "artist": "Arena Band",
+                "startTimeMs": 0,
+            },
+        )
+        self.assertNotIn("sourceType", tracks[2])
+        self.assertEqual(
+            tracks[3],
+            {
+                "trackUri": "spotify:track:2KH16WveTQWT6KOG9Rg6e2",
+                "title": "Spotify Explicit Track",
+                "artist": "Survivor",
+                "startTimeMs": 42000,
+                "sourceType": "spotify",
+            },
+        )
+        self.assertEqual(
+            tracks[4],
+            {
+                "trackUri": "spotify:track:5CQ30WqJwcep0pYcV4AMNc",
+                "title": "Spotify Mismatched SourceType",
+                "artist": "House of Pain",
+                "startTimeMs": 18000,
+            },
+        )
+        self.assertNotIn("sourceType", tracks[4])
+        self.assertNotIn("localFileName", tracks[4])
+        self.assertNotIn("mimeType", tracks[4])
+
+        profile_tracks = cfg["matchProfiles"][0]["soundPads"][0]["tracks"]
+        self.assertEqual(
+            profile_tracks,
+            [
+                {
+                    "trackUri": "local:audio:profile_horn_99",
+                    "title": "Period Jingle",
+                    "artist": "Arena Audio",
+                    "startTimeMs": 500,
+                    "sourceType": "local",
+                    "localFileName": "Period_Jingle.ogg",
+                    "mimeType": "audio/ogg",
+                }
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

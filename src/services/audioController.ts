@@ -1,8 +1,10 @@
 import type {
   AudioStateSnapshot,
   TrackCue,
+  TrackSourceType,
 } from '../types/models.ts';
-import { calculateVolumeSteps } from '../utils/domain.ts';
+import { calculateVolumeSteps, isLocalAudioUri } from '../utils/domain.ts';
+import { getLocalAudioPlaybackUrl } from './localAudioStorage.ts';
 import { spotifyPlayerService } from './spotifyPlayer.ts';
 
 export const RAMP_INTERVAL_MS = 50;
@@ -52,6 +54,12 @@ export class AudioController {
   private activeRampResolve: (() => void) | null = null;
   private previewTimer: ReturnType<typeof setTimeout> | null = null;
   private positionTimer: ReturnType<typeof setInterval> | null = null;
+
+  private activeSourceType: TrackSourceType = 'spotify';
+  private localAudioElement: HTMLAudioElement | null = null;
+  private localAudioCleanup: (() => void) | null = null;
+  private localSeekPending = false;
+  private playRequestSeq = 0;
 
   private audioCtx: AudioContext | null = null;
   private simGainNode: GainNode | null = null;
@@ -122,6 +130,9 @@ export class AudioController {
     positionMs?: number;
     currentTrack?: TrackCue | null;
   }): void {
+    if (this.activeSourceType === 'local' && this.state.isPlaying) {
+      return;
+    }
     this.updateState(patch);
   }
 
@@ -149,6 +160,18 @@ export class AudioController {
     this.stopPositionTicker();
     this.positionTimer = setInterval(() => {
       if (!this.state.isPlaying) {
+        return;
+      }
+      if (
+        this.activeSourceType === 'local' &&
+        this.localAudioElement &&
+        !this.localAudioElement.paused &&
+        !this.localSeekPending &&
+        Number.isFinite(this.localAudioElement.currentTime)
+      ) {
+        this.updateState({
+          positionMs: Math.round(this.localAudioElement.currentTime * 1000),
+        });
         return;
       }
       this.updateState({
@@ -267,6 +290,24 @@ export class AudioController {
     }
   }
 
+  private stopLocalAudioElement(): void {
+    this.localSeekPending = false;
+    if (this.localAudioCleanup) {
+      this.localAudioCleanup();
+      this.localAudioCleanup = null;
+    }
+    if (this.localAudioElement) {
+      try {
+        this.localAudioElement.pause();
+        this.localAudioElement.removeAttribute('src');
+        this.localAudioElement.load();
+      } catch {
+        // Ignore audio element cleanup errors
+      }
+      this.localAudioElement = null;
+    }
+  }
+
   private async applyTransportVolume(volume: number): Promise<void> {
     const clamped = Math.min(1, Math.max(0, volume));
     this.state = {
@@ -274,6 +315,17 @@ export class AudioController {
       volume: clamped,
     };
     this.emit();
+
+    if (this.activeSourceType === 'local') {
+      if (this.localAudioElement) {
+        try {
+          this.localAudioElement.volume = clamped;
+        } catch {
+          // Ignore HTMLAudioElement volume errors
+        }
+      }
+      return;
+    }
 
     this.setSimulatedSynthVolume(clamped);
     if (this.adapter.isReady()) {
@@ -357,14 +409,16 @@ export class AudioController {
   }
 
   private async pauseTransport(): Promise<void> {
+    this.playRequestSeq += 1;
     this.stopPositionTicker();
     this.stopSimulatedSynth();
+    this.stopLocalAudioElement();
     this.updateState({
       isPlaying: false,
       isDucked: false,
     });
 
-    if (this.adapter.isReady()) {
+    if (this.activeSourceType !== 'local' && this.adapter.isReady()) {
       await this.adapter.pause();
     }
   }
@@ -379,6 +433,8 @@ export class AudioController {
     this.clearActiveRamp();
     this.clearPreviewTimer();
 
+    const requestSeq = ++this.playRequestSeq;
+    const isLocal = isLocalAudioUri(trackUri);
     const safeVolume = Math.min(1, Math.max(0, targetVolume));
     const safePosition = Math.max(0, Math.round(positionMs));
     const track: TrackCue = {
@@ -386,43 +442,213 @@ export class AudioController {
       title: trackMeta?.title?.trim() || 'Aktivt spår',
       artist: trackMeta?.artist?.trim() || '',
       startTimeMs: safePosition,
+      sourceType: isLocal ? 'local' : (trackMeta?.sourceType ?? 'spotify'),
+      ...(trackMeta?.localFileName
+        ? { localFileName: trackMeta.localFileName }
+        : {}),
+      ...(trackMeta?.mimeType ? { mimeType: trackMeta.mimeType } : {}),
     };
 
-    if (!this.adapter.isReady() && this.adapter.ensureReady) {
-      try {
-        await this.adapter.ensureReady();
-      } catch {
-        // Calm Tech: ignore ensureReady error and let isReady determine fallback
+    if (isLocal) {
+      this.stopSimulatedSynth();
+      this.stopLocalAudioElement();
+      this.activeSourceType = 'local';
+
+      if (this.adapter.isReady()) {
+        try {
+          await this.adapter.pause();
+        } catch {
+          // Calm Tech: ignore Spotify pause failures when switching to local audio
+        }
+        if (requestSeq !== this.playRequestSeq) {
+          return;
+        }
       }
-    }
 
-    await this.applyTransportVolume(safeVolume);
+      await this.applyTransportVolume(safeVolume);
 
-    const canUseSpotify = this.adapter.isReady();
-    if (canUseSpotify) {
-      try {
-        await this.adapter.playTrack(trackUri, safePosition);
-        this.stopSimulatedSynth();
-        const resolvedName =
-          this.adapter.getDeviceName?.()?.trim() ||
-          this.state.deviceName ||
-          'Hockey DJ Booth';
+      const playbackUrl = await getLocalAudioPlaybackUrl(trackUri);
+      if (requestSeq !== this.playRequestSeq) {
+        return;
+      }
+
+      if (typeof Audio !== 'undefined' && playbackUrl) {
+        const audio = new Audio(playbackUrl);
+        audio.volume = safeVolume;
+        this.localAudioElement = audio;
+
+        const targetSeconds = safePosition / 1000;
+        const applyInitialSeek = () => {
+          if (this.localAudioElement !== audio) {
+            return;
+          }
+          if (targetSeconds > 0) {
+            try {
+              const maxTime =
+                Number.isFinite(audio.duration) && audio.duration > 0
+                  ? Math.max(0, audio.duration - 0.05)
+                  : targetSeconds;
+              audio.currentTime = Math.min(targetSeconds, maxTime);
+            } catch {
+              // Ignore seek errors
+            }
+          }
+          this.localSeekPending = false;
+        };
+
+        const onLoadedMetadata = () => {
+          audio.removeEventListener('loadedmetadata', onLoadedMetadata);
+          applyInitialSeek();
+        };
+
+        const onEnded = () => {
+          if (this.localAudioElement !== audio) {
+            return;
+          }
+          this.clearPreviewTimer();
+          this.stopPositionTicker();
+          this.stopLocalAudioElement();
+          this.updateState({
+            isPlaying: false,
+            isDucked: false,
+            statusMessage: `Klar: ${track.title}`,
+          });
+        };
+
+        audio.addEventListener('ended', onEnded);
+        if (targetSeconds > 0) {
+          if (audio.readyState >= 1) {
+            applyInitialSeek();
+          } else {
+            this.localSeekPending = true;
+            audio.addEventListener('loadedmetadata', onLoadedMetadata);
+          }
+        }
+
+        this.localAudioCleanup = () => {
+          audio.removeEventListener('loadedmetadata', onLoadedMetadata);
+          audio.removeEventListener('ended', onEnded);
+        };
+
+        try {
+          await audio.play();
+          if (requestSeq !== this.playRequestSeq) {
+            if (this.localAudioElement === audio) {
+              this.stopLocalAudioElement();
+            }
+            return;
+          }
+          this.updateState({
+            isPlaying: true,
+            isDucked: false,
+            positionMs: safePosition,
+            currentTrack: { ...track, sourceType: 'local' },
+            statusMessage: `Spelar lokal ljudfil: ${track.title}`,
+            error: null,
+          });
+        } catch (err) {
+          if (requestSeq !== this.playRequestSeq) {
+            return;
+          }
+          this.stopLocalAudioElement();
+          const message =
+            err instanceof Error
+              ? err.message
+              : 'Kunde inte spela upp den lokala ljudfilen.';
+          this.startSimulatedSynth(safeVolume);
+          this.updateState({
+            isPlaying: true,
+            isDucked: false,
+            positionMs: safePosition,
+            currentTrack: { ...track, sourceType: 'local' },
+            statusMessage: 'Simulerat Läge (lokal ljudfil fallback)',
+            error: message,
+          });
+        }
+      } else if (!playbackUrl) {
+        this.startSimulatedSynth(safeVolume);
         this.updateState({
-          mode: 'spotify',
           isPlaying: true,
           isDucked: false,
           positionMs: safePosition,
-          currentTrack: track,
-          deviceId: this.adapter.getDeviceId(),
-          deviceName: resolvedName,
-          statusMessage: `Spotify Ansluten (${resolvedName})`,
+          currentTrack: { ...track, sourceType: 'local' },
+          statusMessage: 'Lokal ljudfil saknas – Simulerat Läge',
+          error:
+            'Lokal ljudfil saknas i webbläsarens lagring. Välj filen igen i Förberedelseläget.',
+        });
+      } else {
+        this.updateState({
+          isPlaying: true,
+          isDucked: false,
+          positionMs: safePosition,
+          currentTrack: { ...track, sourceType: 'local' },
+          statusMessage: `Spelar lokal ljudfil: ${track.title}`,
           error: null,
         });
-      } catch (err) {
-        const message =
-          err instanceof Error
-            ? err.message
-            : 'Kunde inte starta Spotify-uppspelning.';
+      }
+    } else {
+      this.stopLocalAudioElement();
+      this.activeSourceType = 'spotify';
+
+      if (!this.adapter.isReady() && this.adapter.ensureReady) {
+        try {
+          await this.adapter.ensureReady();
+        } catch {
+          // Calm Tech: ignore ensureReady error and let isReady determine fallback
+        }
+        if (requestSeq !== this.playRequestSeq) {
+          return;
+        }
+      }
+
+      await this.applyTransportVolume(safeVolume);
+      if (requestSeq !== this.playRequestSeq) {
+        return;
+      }
+
+      const canUseSpotify = this.adapter.isReady();
+      if (canUseSpotify) {
+        try {
+          await this.adapter.playTrack(trackUri, safePosition);
+          if (requestSeq !== this.playRequestSeq) {
+            return;
+          }
+          this.stopSimulatedSynth();
+          const resolvedName =
+            this.adapter.getDeviceName?.()?.trim() ||
+            this.state.deviceName ||
+            'Hockey DJ Booth';
+          this.updateState({
+            mode: 'spotify',
+            isPlaying: true,
+            isDucked: false,
+            positionMs: safePosition,
+            currentTrack: track,
+            deviceId: this.adapter.getDeviceId(),
+            deviceName: resolvedName,
+            statusMessage: `Spotify Ansluten (${resolvedName})`,
+            error: null,
+          });
+        } catch (err) {
+          if (requestSeq !== this.playRequestSeq) {
+            return;
+          }
+          const message =
+            err instanceof Error
+              ? err.message
+              : 'Kunde inte starta Spotify-uppspelning.';
+          this.startSimulatedSynth(safeVolume);
+          this.updateState({
+            mode: 'simulated',
+            isPlaying: true,
+            isDucked: false,
+            positionMs: safePosition,
+            currentTrack: track,
+            statusMessage: 'Simulerat Läge (Spotify fallback)',
+            error: message,
+          });
+        }
+      } else {
         this.startSimulatedSynth(safeVolume);
         this.updateState({
           mode: 'simulated',
@@ -430,20 +656,9 @@ export class AudioController {
           isDucked: false,
           positionMs: safePosition,
           currentTrack: track,
-          statusMessage: 'Simulerat Läge (Spotify fallback)',
-          error: message,
+          error: null,
         });
       }
-    } else {
-      this.startSimulatedSynth(safeVolume);
-      this.updateState({
-        mode: 'simulated',
-        isPlaying: true,
-        isDucked: false,
-        positionMs: safePosition,
-        currentTrack: track,
-        error: null,
-      });
     }
 
     this.startPositionTicker();
@@ -507,10 +722,12 @@ export class AudioController {
   }
 
   public dispose(): void {
+    this.playRequestSeq += 1;
     this.clearActiveRamp();
     this.clearPreviewTimer();
     this.stopPositionTicker();
     this.stopSimulatedSynth();
+    this.stopLocalAudioElement();
     if (this.audioCtx) {
       void this.audioCtx.close().catch(() => {});
       this.audioCtx = null;

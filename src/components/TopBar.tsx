@@ -1,5 +1,6 @@
 import {
   Disc3,
+  FileAudio,
   Layers,
   LogIn,
   LogOut,
@@ -18,7 +19,7 @@ import type {
   KeyBindings,
   MatchProfile,
 } from '../types/models.ts';
-import { formatMsToMmSs } from '../utils/domain.ts';
+import { formatMsToMmSs, isLocalAudioUri } from '../utils/domain.ts';
 
 interface TopBarProps {
   mode: AppMode;
@@ -62,6 +63,10 @@ export function TopBar({
   const volumePercent = Math.round(audioState.volume * 100);
   const duckPercent = Math.round(duckVolume * 100);
   const isSpotifyConnected = audioState.mode === 'spotify';
+  const isCurrentLocal =
+    audioState.currentTrack !== null &&
+    (audioState.currentTrack.sourceType === 'local' ||
+      isLocalAudioUri(audioState.currentTrack.trackUri));
 
   const duckHotkey = keyBindings.actions.toggleDuck;
   const fadeOutHotkey = keyBindings.actions.fadeOut;
@@ -112,6 +117,13 @@ export function TopBar({
                   : 'Simulerat Läge'}
               </span>
             </div>
+
+            {audioState.isPlaying && isCurrentLocal && (
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/40 bg-cyan-950/60 px-3 py-1 text-xs font-semibold text-cyan-200">
+                <FileAudio className="h-3.5 w-3.5" />
+                <span>Spelar lokal ljudfil</span>
+              </div>
+            )}
 
             {isSpotifyAuthenticated ? (
               <div className="inline-flex items-center gap-2">
@@ -242,6 +254,19 @@ export function TopBar({
                     ? audioState.currentTrack.title
                     : 'Ingen låt spelas'}
                 </span>
+                {isCurrentLocal && (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1 rounded border border-cyan-500/40 bg-cyan-950/70 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-200"
+                    title={
+                      audioState.currentTrack?.localFileName
+                        ? `Lokal ljudfil: ${audioState.currentTrack.localFileName}`
+                        : 'Lokal ljudfil'
+                    }
+                  >
+                    <FileAudio className="h-3 w-3" />
+                    Lokal ljudfil
+                  </span>
+                )}
                 {audioState.isDucked && (
                   <span className="rounded bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-300">
                     Duckad {duckPercent}%

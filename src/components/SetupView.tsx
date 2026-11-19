@@ -1,4 +1,4 @@
-import { useEffect, useState, type ChangeEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import {
   AlertTriangle,
   ArrowDown,
@@ -8,6 +8,7 @@ import {
   Download,
   Keyboard,
   Layers,
+  Loader2,
   Music,
   Play,
   Plus,
@@ -25,6 +26,7 @@ import {
   MATCH_ACTION_LABELS,
   PAD_CATEGORY_LABELS,
 } from '../data/defaults.ts';
+import { fetchSpotifyTrackMetadata } from '../services/spotifyMetadata.ts';
 import { useAppStore } from '../store/useAppStore.ts';
 import type {
   AppSettings,
@@ -36,6 +38,7 @@ import type {
   TrackCue,
 } from '../types/models.ts';
 import {
+  extractSpotifyTrackId,
   formatMsToMmSs,
   isValidMmSs,
   parseRosterText,
@@ -924,6 +927,38 @@ function MatchProfilesSection() {
   );
 }
 
+type MetadataLookupStatus =
+  | { state: 'idle' }
+  | { state: 'loading'; message: string }
+  | { state: 'success'; message: string }
+  | { state: 'error'; message: string };
+
+function MetadataStatusLine({ status }: { status: MetadataLookupStatus }) {
+  if (status.state === 'idle') {
+    return null;
+  }
+  if (status.state === 'loading') {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-blue-300">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        {status.message}
+      </span>
+    );
+  }
+  if (status.state === 'success') {
+    return (
+      <span className="text-[11px] font-medium text-emerald-400">
+        {status.message}
+      </span>
+    );
+  }
+  return (
+    <span className="text-[11px] font-medium text-amber-300">
+      {status.message}
+    </span>
+  );
+}
+
 interface TrackCueRowProps {
   track: TrackCue;
   padVolume: number;
@@ -938,15 +973,38 @@ function TrackCueRow({
   onRemove,
   onPreview,
 }: TrackCueRowProps) {
+  const spotifyClientId = useAppStore((s) => s.settings.spotifyClientId);
+
   const [uriInput, setUriInput] = useState(track.trackUri);
   const [uriError, setUriError] = useState<string | null>(null);
   const [timeInput, setTimeInput] = useState(
     formatMsToMmSs(track.startTimeMs),
   );
   const [timeValid, setTimeValid] = useState(true);
+  const [metaStatus, setMetaStatus] = useState<MetadataLookupStatus>({
+    state: 'idle',
+  });
+
+  const fetchSeqRef = useRef(0);
+  const latestTrackIdRef = useRef<string | null>(
+    extractSpotifyTrackId(track.trackUri),
+  );
+  const lastAutoFetchedIdRef = useRef<string | null>(
+    extractSpotifyTrackId(track.trackUri),
+  );
+  const lastEmittedUriRef = useRef(track.trackUri);
 
   useEffect(() => {
-    setUriInput(track.trackUri);
+    if (track.trackUri !== lastEmittedUriRef.current) {
+      lastEmittedUriRef.current = track.trackUri;
+      setUriInput(track.trackUri);
+      setUriError(null);
+      const nextTrackId = extractSpotifyTrackId(track.trackUri);
+      latestTrackIdRef.current = nextTrackId;
+      lastAutoFetchedIdRef.current = nextTrackId;
+      fetchSeqRef.current += 1;
+      setMetaStatus({ state: 'idle' });
+    }
   }, [track.trackUri]);
 
   useEffect(() => {
@@ -954,14 +1012,77 @@ function TrackCueRow({
     setTimeValid(true);
   }, [track.startTimeMs]);
 
+  const runMetadataLookup = async (rawInput: string, force: boolean) => {
+    const trackId = extractSpotifyTrackId(rawInput);
+    if (!trackId) {
+      latestTrackIdRef.current = null;
+      if (force) {
+        setMetaStatus({
+          state: 'error',
+          message: 'Ange en giltig Spotify-länk eller URI först.',
+        });
+      } else {
+        setMetaStatus({ state: 'idle' });
+      }
+      return;
+    }
+
+    if (!force && lastAutoFetchedIdRef.current === trackId) {
+      return;
+    }
+
+    lastAutoFetchedIdRef.current = trackId;
+    latestTrackIdRef.current = trackId;
+    const requestId = ++fetchSeqRef.current;
+    setMetaStatus({
+      state: 'loading',
+      message: 'Hämtar låttitel & artist...',
+    });
+
+    const metadata = await fetchSpotifyTrackMetadata(rawInput, spotifyClientId);
+
+    if (
+      fetchSeqRef.current !== requestId ||
+      latestTrackIdRef.current !== trackId
+    ) {
+      return;
+    }
+
+    if (metadata) {
+      lastEmittedUriRef.current = metadata.trackUri;
+      onUpdate({
+        trackUri: metadata.trackUri,
+        title: metadata.title,
+        artist: metadata.artist,
+      });
+      setMetaStatus({
+        state: 'success',
+        message: metadata.artist
+          ? `Hämtade: ${metadata.title} – ${metadata.artist}`
+          : `Hämtade: ${metadata.title}`,
+      });
+    } else {
+      setMetaStatus({
+        state: 'error',
+        message: 'Kunde inte hämta titel/artist automatiskt – fyll i manuellt.',
+      });
+    }
+  };
+
   const handleUriChange = (raw: string) => {
     setUriInput(raw);
     const parsed = tryParseSpotifyUri(raw);
     if (parsed.ok) {
       setUriError(null);
+      lastEmittedUriRef.current = parsed.uri;
       onUpdate({ trackUri: parsed.uri });
+      void runMetadataLookup(raw, false);
     } else {
       setUriError(parsed.error);
+      latestTrackIdRef.current = null;
+      lastAutoFetchedIdRef.current = null;
+      fetchSeqRef.current += 1;
+      setMetaStatus({ state: 'idle' });
     }
   };
 
@@ -974,6 +1095,8 @@ function TrackCueRow({
       setTimeValid(false);
     }
   };
+
+  const hasValidTrackId = extractSpotifyTrackId(uriInput) !== null;
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-950/90 p-3 space-y-2.5">
@@ -1048,18 +1171,33 @@ function TrackCueRow({
         <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
           Spotify-länk eller URI (auto-konverteras)
         </label>
-        <input
-          type="text"
-          value={uriInput}
-          onChange={(e) => handleUriChange(e.target.value)}
-          placeholder="https://open.spotify.com/track/... eller spotify:track:..."
-          className={`w-full rounded-lg border px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:outline-none ${
-            uriError
-              ? 'border-red-500 bg-red-950/30'
-              : 'border-slate-800 bg-slate-900 focus:border-blue-500'
-          }`}
-        />
+        <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
+          <input
+            type="text"
+            value={uriInput}
+            onChange={(e) => handleUriChange(e.target.value)}
+            placeholder="https://open.spotify.com/track/... eller spotify:track:..."
+            className={`flex-1 min-w-0 rounded-lg border px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:outline-none ${
+              uriError
+                ? 'border-red-500 bg-red-950/30'
+                : 'border-slate-800 bg-slate-900 focus:border-blue-500'
+            }`}
+          />
+          <button
+            type="button"
+            disabled={!hasValidTrackId || metaStatus.state === 'loading'}
+            onClick={() => void runMetadataLookup(uriInput, true)}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-blue-500/40 bg-blue-950/50 px-3 py-1.5 text-xs font-bold text-blue-200 hover:bg-blue-900/60 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+          >
+            Hämta info
+          </button>
+        </div>
         {uriError && <p className="mt-1 text-[11px] text-red-400">{uriError}</p>}
+        {metaStatus.state !== 'idle' && (
+          <div className="mt-1">
+            <MetadataStatusLine status={metaStatus} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1089,6 +1227,7 @@ function SoundPadEditor({
   const updateTrackInPad = useAppStore((s) => s.updateTrackInPad);
   const removeTrackFromPad = useAppStore((s) => s.removeTrackFromPad);
   const setPadHotkey = useAppStore((s) => s.setPadHotkey);
+  const spotifyClientId = useAppStore((s) => s.settings.spotifyClientId);
 
   const [newUrl, setNewUrl] = useState('');
   const [newTitle, setNewTitle] = useState('');
@@ -1096,10 +1235,89 @@ function SoundPadEditor({
   const [newMmSs, setNewMmSs] = useState('00:00');
   const [formError, setFormError] = useState<string | null>(null);
   const [hotkeyNotice, setHotkeyNotice] = useState<string | null>(null);
+  const [metaStatus, setMetaStatus] = useState<MetadataLookupStatus>({
+    state: 'idle',
+  });
+
+  const fetchSeqRef = useRef(0);
+  const latestTrackIdRef = useRef<string | null>(null);
+  const lastAutoFetchedIdRef = useRef<string | null>(null);
+  const userEditedMetaRef = useRef(false);
 
   const parsedPreview = newUrl.trim()
     ? tryParseSpotifyUri(newUrl)
     : null;
+  const hasValidNewTrackId = extractSpotifyTrackId(newUrl) !== null;
+
+  const runNewTrackMetadataLookup = async (rawInput: string, force: boolean) => {
+    const trackId = extractSpotifyTrackId(rawInput);
+    if (!trackId) {
+      latestTrackIdRef.current = null;
+      if (force) {
+        setMetaStatus({
+          state: 'error',
+          message: 'Ange en giltig Spotify-länk eller URI först.',
+        });
+      } else {
+        setMetaStatus({ state: 'idle' });
+      }
+      return;
+    }
+
+    if (!force && lastAutoFetchedIdRef.current === trackId) {
+      return;
+    }
+
+    lastAutoFetchedIdRef.current = trackId;
+    latestTrackIdRef.current = trackId;
+    userEditedMetaRef.current = false;
+    const requestId = ++fetchSeqRef.current;
+    setMetaStatus({
+      state: 'loading',
+      message: 'Hämtar låttitel & artist...',
+    });
+
+    const metadata = await fetchSpotifyTrackMetadata(rawInput, spotifyClientId);
+
+    if (
+      fetchSeqRef.current !== requestId ||
+      latestTrackIdRef.current !== trackId
+    ) {
+      return;
+    }
+
+    if (metadata) {
+      if (force || !userEditedMetaRef.current) {
+        setNewTitle(metadata.title);
+        setNewArtist(metadata.artist);
+      }
+      setMetaStatus({
+        state: 'success',
+        message: metadata.artist
+          ? `Hämtade: ${metadata.title} – ${metadata.artist}`
+          : `Hämtade: ${metadata.title}`,
+      });
+    } else {
+      setMetaStatus({
+        state: 'error',
+        message: 'Kunde inte hämta titel/artist automatiskt – fyll i manuellt.',
+      });
+    }
+  };
+
+  const handleNewUrlChange = (raw: string) => {
+    setNewUrl(raw);
+    setFormError(null);
+    const trackId = extractSpotifyTrackId(raw);
+    if (!trackId) {
+      latestTrackIdRef.current = null;
+      lastAutoFetchedIdRef.current = null;
+      fetchSeqRef.current += 1;
+      setMetaStatus({ state: 'idle' });
+      return;
+    }
+    void runNewTrackMetadataLookup(raw, false);
+  };
 
   const handleAddTrack = () => {
     const uriRes = tryParseSpotifyUri(newUrl);
@@ -1124,6 +1342,11 @@ function SoundPadEditor({
     setNewArtist('');
     setNewMmSs('00:00');
     setFormError(null);
+    latestTrackIdRef.current = null;
+    lastAutoFetchedIdRef.current = null;
+    userEditedMetaRef.current = false;
+    fetchSeqRef.current += 1;
+    setMetaStatus({ state: 'idle' });
   };
 
   return (
@@ -1309,28 +1532,41 @@ function SoundPadEditor({
           <div className="text-xs font-bold text-slate-300">
             + Lägg till låt i poolen
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-[1.5fr_1fr_1fr_100px] gap-2">
-            <input
-              type="text"
-              value={newUrl}
-              onChange={(e) => {
-                setNewUrl(e.target.value);
-                setFormError(null);
-              }}
-              placeholder="Klistra in Spotify-länk eller URI..."
-              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-mono text-white placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
-            />
+          <div className="grid grid-cols-1 md:grid-cols-[1.8fr_1fr_1fr_100px] gap-2">
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                value={newUrl}
+                onChange={(e) => handleNewUrlChange(e.target.value)}
+                placeholder="Klistra in Spotify-länk eller URI..."
+                className="flex-1 min-w-0 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-mono text-white placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
+              />
+              <button
+                type="button"
+                disabled={!hasValidNewTrackId || metaStatus.state === 'loading'}
+                onClick={() => void runNewTrackMetadataLookup(newUrl, true)}
+                className="inline-flex shrink-0 items-center rounded-lg border border-blue-500/40 bg-blue-950/50 px-2.5 py-2 text-xs font-bold text-blue-200 hover:bg-blue-900/60 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              >
+                Hämta info
+              </button>
+            </div>
             <input
               type="text"
               value={newTitle}
-              onChange={(e) => setNewTitle(e.target.value)}
+              onChange={(e) => {
+                userEditedMetaRef.current = true;
+                setNewTitle(e.target.value);
+              }}
               placeholder="Låttitel"
               className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
             />
             <input
               type="text"
               value={newArtist}
-              onChange={(e) => setNewArtist(e.target.value)}
+              onChange={(e) => {
+                userEditedMetaRef.current = true;
+                setNewArtist(e.target.value);
+              }}
               placeholder="Artist"
               className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
             />
@@ -1347,12 +1583,13 @@ function SoundPadEditor({
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-xs">
+            <div className="flex flex-wrap items-center gap-3 text-xs">
               {parsedPreview?.ok && (
                 <span className="text-emerald-400 font-mono">
                   Konverterad URI: {parsedPreview.uri}
                 </span>
               )}
+              <MetadataStatusLine status={metaStatus} />
               {formError && <span className="text-red-400">{formError}</span>}
             </div>
             <button
@@ -1853,6 +2090,72 @@ export function SetupView({ onPreviewTrack, onStopAudio }: SetupViewProps) {
                     }
                     className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-none"
                   />
+                </div>
+              </div>
+
+              {/* Away Goal Silence Setting */}
+              <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3.5 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <div className="text-sm font-bold text-white">
+                      Sportslig tystnad vid bortamål
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      {settings.awayGoalSilence
+                        ? 'Sportslig tystnad: ingen musik startas automatiskt vid bortamål (omstartslåt kan startas manuellt inför tekning).'
+                        : 'Starta musik från listan direkt vid bortamål: låt från bortamål-/omstartslistan startar automatiskt.'}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.awayGoalSilence}
+                    aria-label="Sportslig tystnad vid bortamål"
+                    onClick={() =>
+                      updateSettings({
+                        awayGoalSilence: !settings.awayGoalSilence,
+                      })
+                    }
+                    className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                      settings.awayGoalSilence
+                        ? 'border-emerald-400/50 bg-emerald-600'
+                        : 'border-orange-400/50 bg-orange-600'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                        settings.awayGoalSilence
+                          ? 'translate-x-6'
+                          : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => updateSettings({ awayGoalSilence: true })}
+                    className={`rounded-lg border px-3 py-2 text-left text-xs font-bold transition-colors cursor-pointer ${
+                      settings.awayGoalSilence
+                        ? 'border-emerald-500/60 bg-emerald-950/50 text-emerald-200'
+                        : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
+                    }`}
+                  >
+                    Sportslig tystnad
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateSettings({ awayGoalSilence: false })}
+                    className={`rounded-lg border px-3 py-2 text-left text-xs font-bold transition-colors cursor-pointer ${
+                      !settings.awayGoalSilence
+                        ? 'border-orange-500/60 bg-orange-950/50 text-orange-200'
+                        : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
+                    }`}
+                  >
+                    Starta musik från listan direkt vid bortamål
+                  </button>
                 </div>
               </div>
             </div>

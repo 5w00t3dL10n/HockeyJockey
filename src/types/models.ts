@@ -64,6 +64,7 @@ export interface PenaltyDefinition {
 export interface AppSettings {
   duckVolume: number; // T.ex. 0.2
   fadeOutDurationMs: number; // T.ex. 600
+  awayGoalSilence: boolean;
   spotifyClientId: string;
   spotifyRedirectUri: string;
   keyBindings: KeyBindings;
@@ -97,7 +98,11 @@ export interface MatchProfile {
   settings?: Partial<
     Pick<
       AppSettings,
-      'duckVolume' | 'fadeOutDurationMs' | 'scriptTemplates' | 'keyBindings'
+      | 'duckVolume'
+      | 'fadeOutDurationMs'
+      | 'awayGoalSilence'
+      | 'scriptTemplates'
+      | 'keyBindings'
     >
   >;
   updatedAt: string;

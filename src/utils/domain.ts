@@ -153,6 +153,327 @@ function cloneDefaultSnapshot(): MatchConfigSnapshot {
   };
 }
 
+export function extractSpotifyTrackId(input: string): string | null {
+  const trimmed = typeof input === 'string' ? input.trim() : '';
+  if (!trimmed) {
+    return null;
+  }
+
+  const uriMatch = SPOTIFY_URI_REGEX.exec(trimmed);
+  if (uriMatch && SPOTIFY_ID_REGEX.test(uriMatch[1])) {
+    return uriMatch[1];
+  }
+
+  const urlMatch = SPOTIFY_URL_REGEX.exec(trimmed);
+  if (urlMatch && SPOTIFY_ID_REGEX.test(urlMatch[1])) {
+    return urlMatch[1];
+  }
+
+  return null;
+}
+
+const NAMED_HTML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+};
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&#(\d+);/g, (_, dec: string) => {
+      const code = Number.parseInt(dec, 10);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : '';
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex: string) => {
+      const code = Number.parseInt(hex, 16);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : '';
+    })
+    .replace(/&([a-zA-Z]+);/g, (full, name: string) => {
+      const mapped = NAMED_HTML_ENTITIES[name.toLowerCase()];
+      return mapped ?? full;
+    });
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function extractArtistsList(rawArtists: unknown): string {
+  if (!Array.isArray(rawArtists)) {
+    return '';
+  }
+  return rawArtists
+    .map((artist) =>
+      isPlainObject(artist) ? nonEmptyString(artist.name) : null,
+    )
+    .filter((name): name is string => name !== null)
+    .join(', ');
+}
+
+function extractMetaContent(html: string, key: string): string | null {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const patterns = [
+    new RegExp(
+      `<meta[^>]+(?:property|name)=["']${escaped}["'][^>]+content=["']([^"']*)["'][^>]*>`,
+      'i',
+    ),
+    new RegExp(
+      `<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${escaped}["'][^>]*>`,
+      'i',
+    ),
+  ];
+  for (const regex of patterns) {
+    const match = regex.exec(html);
+    if (match?.[1]) {
+      const decoded = decodeHtmlEntities(match[1]).trim();
+      if (decoded) {
+        return decoded;
+      }
+    }
+  }
+  return null;
+}
+
+function extractArtistFromOgDescription(description: string): string {
+  const withoutPrefix = description
+    .trim()
+    .replace(/^Listen to .+?\s+on Spotify\.\s*/i, '');
+  if (!withoutPrefix) {
+    return '';
+  }
+
+  if (withoutPrefix.includes('·') || withoutPrefix.includes('•')) {
+    const parts = withoutPrefix
+      .split(/[·•]/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    if (parts.length >= 2) {
+      const firstLower = parts[0].toLowerCase();
+      const secondLower = parts[1].toLowerCase();
+      if (
+        secondLower === 'song' ||
+        secondLower === 'single' ||
+        secondLower === 'track' ||
+        secondLower === 'låt'
+      ) {
+        return parts[0];
+      }
+      if (
+        firstLower === 'song' ||
+        firstLower === 'single' ||
+        firstLower === 'track' ||
+        firstLower === 'låt'
+      ) {
+        return parts[1];
+      }
+      return parts[0];
+    }
+  }
+
+  return '';
+}
+
+function splitTitleBySeparator(
+  rawTitle: string,
+): { title: string; artist: string } | null {
+  const dashMatch = /^(.+?)\s+-\s+(.+)$/.exec(rawTitle);
+  if (dashMatch) {
+    const title = dashMatch[1].trim();
+    const artist = dashMatch[2].trim();
+    if (title && artist) {
+      return { title, artist };
+    }
+  }
+
+  const byMatch = /^(.+?)\s+by\s+(.+)$/i.exec(rawTitle);
+  if (byMatch) {
+    const title = byMatch[1].trim();
+    const artist = byMatch[2].trim();
+    if (title && artist) {
+      return { title, artist };
+    }
+  }
+
+  return null;
+}
+
+function parseSpotifyHtmlMetadata(
+  html: string,
+): { title: string; artist: string } | null {
+  const nextDataMatch =
+    /<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i.exec(
+      html,
+    );
+  if (nextDataMatch?.[1]) {
+    try {
+      const parsedJson: unknown = JSON.parse(nextDataMatch[1]);
+      if (typeof parsedJson !== 'string') {
+        const result = parseSpotifyMetadataPayload(parsedJson);
+        if (result) {
+          return result;
+        }
+      }
+    } catch {
+      // Ignore malformed __NEXT_DATA__ and fall back to title/meta tags
+    }
+  }
+
+  const titleTagMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  let titleTagParsed: { title: string; artist: string } | null = null;
+  let titleTagPlain: string | null = null;
+
+  if (titleTagMatch?.[1]) {
+    const cleanedTitleTag = decodeHtmlEntities(titleTagMatch[1])
+      .replace(/\s*[|\-–—]\s*Spotify\s*$/i, '')
+      .trim();
+
+    if (
+      cleanedTitleTag &&
+      !/^spotify(?:\s*[–-]\s*web player.*)?$/i.test(cleanedTitleTag)
+    ) {
+      const songAndLyricsMatch =
+        /^(.+?)\s+-\s+(?:song(?:\s+and\s+lyrics)?\s+by|låt(?:\s+och\s+text)?\s+av)\s+(.+)$/i.exec(
+          cleanedTitleTag,
+        );
+      if (songAndLyricsMatch) {
+        titleTagParsed = {
+          title: songAndLyricsMatch[1].trim(),
+          artist: songAndLyricsMatch[2].trim(),
+        };
+      } else {
+        const split = splitTitleBySeparator(cleanedTitleTag);
+        if (split) {
+          titleTagParsed = split;
+        } else {
+          titleTagPlain = cleanedTitleTag;
+        }
+      }
+    }
+  }
+
+  if (titleTagParsed && titleTagParsed.title) {
+    return titleTagParsed;
+  }
+
+  const ogTitleRaw = extractMetaContent(html, 'og:title');
+  const ogTitle =
+    ogTitleRaw && !/^spotify(?:\s*[–-]\s*web player.*)?$/i.test(ogTitleRaw)
+      ? ogTitleRaw
+      : null;
+  const ogDesc = extractMetaContent(html, 'og:description');
+  const ogArtist = ogDesc ? extractArtistFromOgDescription(ogDesc) : '';
+
+  if (ogTitle) {
+    if (ogArtist) {
+      return { title: ogTitle, artist: ogArtist };
+    }
+    const split = splitTitleBySeparator(ogTitle);
+    if (split) {
+      return split;
+    }
+    return { title: ogTitle, artist: '' };
+  }
+
+  if (titleTagPlain) {
+    return { title: titleTagPlain, artist: ogArtist };
+  }
+
+  return null;
+}
+
+export function parseSpotifyMetadataPayload(
+  payload: unknown,
+): { title: string; artist: string } | null {
+  if (typeof payload === 'string') {
+    const trimmed = payload.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsedJson: unknown = JSON.parse(trimmed);
+        if (isPlainObject(parsedJson)) {
+          return parseSpotifyMetadataPayload(parsedJson);
+        }
+      } catch {
+        // Not valid JSON, continue with HTML parsing
+      }
+    }
+    return parseSpotifyHtmlMetadata(payload);
+  }
+
+  if (!isPlainObject(payload)) {
+    return null;
+  }
+
+  // 1. Spotify Embed __NEXT_DATA__
+  if (
+    isPlainObject(payload.props) &&
+    isPlainObject(payload.props.pageProps) &&
+    isPlainObject(payload.props.pageProps.state) &&
+    isPlainObject(payload.props.pageProps.state.data) &&
+    isPlainObject(payload.props.pageProps.state.data.entity)
+  ) {
+    const entity = payload.props.pageProps.state.data.entity;
+    const title = nonEmptyString(entity.name) ?? nonEmptyString(entity.title);
+    if (title) {
+      const artist =
+        extractArtistsList(entity.artists) ||
+        nonEmptyString(entity.subtitle) ||
+        '';
+      return { title, artist };
+    }
+  }
+
+  // 2. Normalized metadata payload ({ title, artist })
+  const directTitle = nonEmptyString(payload.title);
+  if (directTitle && typeof payload.artist === 'string') {
+    return {
+      title: directTitle,
+      artist: payload.artist.trim(),
+    };
+  }
+
+  // 3. Spotify Web API /v1/tracks/{id} ({ name, artists })
+  const apiTitle = nonEmptyString(payload.name);
+  if (apiTitle && Array.isArray(payload.artists)) {
+    return {
+      title: apiTitle,
+      artist: extractArtistsList(payload.artists),
+    };
+  }
+
+  // 4. Spotify /oembed ({ title, author_name? })
+  if (directTitle) {
+    const authorName = nonEmptyString(payload.author_name) ?? '';
+    if (authorName && authorName.toLowerCase() !== 'spotify') {
+      return {
+        title: directTitle,
+        artist: authorName,
+      };
+    }
+
+    const split = splitTitleBySeparator(directTitle);
+    if (split) {
+      return split;
+    }
+
+    return {
+      title: directTitle,
+      artist: authorName.toLowerCase() === 'spotify' ? '' : authorName,
+    };
+  }
+
+  return null;
+}
+
 export function tryParseSpotifyUri(
   input: string,
 ): { ok: true; uri: string } | { ok: false; error: string } {
@@ -161,14 +482,9 @@ export function tryParseSpotifyUri(
     return { ok: false, error: 'Spotify-länk eller URI får inte vara tom.' };
   }
 
-  const uriMatch = SPOTIFY_URI_REGEX.exec(trimmed);
-  if (uriMatch && SPOTIFY_ID_REGEX.test(uriMatch[1])) {
-    return { ok: true, uri: `spotify:track:${uriMatch[1]}` };
-  }
-
-  const urlMatch = SPOTIFY_URL_REGEX.exec(trimmed);
-  if (urlMatch && SPOTIFY_ID_REGEX.test(urlMatch[1])) {
-    return { ok: true, uri: `spotify:track:${urlMatch[1]}` };
+  const trackId = extractSpotifyTrackId(trimmed);
+  if (trackId) {
+    return { ok: true, uri: `spotify:track:${trackId}` };
   }
 
   return {
@@ -1051,9 +1367,15 @@ function sanitizeSettings(
   validPadIds?: Set<string>,
 ): AppSettings {
   const defaultClientId = fallback.spotifyClientId || DEFAULT_SPOTIFY_CLIENT_ID;
+  const fallbackAwayGoalSilence =
+    typeof fallback.awayGoalSilence === 'boolean'
+      ? fallback.awayGoalSilence
+      : DEFAULT_SETTINGS.awayGoalSilence;
+
   if (!isPlainObject(rawSettings)) {
     return {
       ...fallback,
+      awayGoalSilence: fallbackAwayGoalSilence,
       spotifyClientId: defaultClientId,
       keyBindings: sanitizeKeyBindings(
         undefined,
@@ -1088,6 +1410,10 @@ function sanitizeSettings(
         fallback.fadeOutDurationMs,
       ),
     ),
+    awayGoalSilence:
+      typeof rawSettings.awayGoalSilence === 'boolean'
+        ? rawSettings.awayGoalSilence
+        : fallbackAwayGoalSilence,
     spotifyClientId: rawClientId || defaultClientId,
     spotifyRedirectUri:
       typeof rawSettings.spotifyRedirectUri === 'string' &&
@@ -1235,6 +1561,10 @@ export function sanitizeMatchProfile(
           DEFAULT_SETTINGS.fadeOutDurationMs,
         ),
       );
+    }
+
+    if (typeof rawSettings.awayGoalSilence === 'boolean') {
+      sanitizedSettings.awayGoalSilence = rawSettings.awayGoalSilence;
     }
 
     if (isPlainObject(rawSettings.scriptTemplates)) {

@@ -757,6 +757,7 @@ export const useAppStore = create<AppStoreState>()(
           settings: {
             duckVolume: state.settings.duckVolume,
             fadeOutDurationMs: state.settings.fadeOutDurationMs,
+            awayGoalSilence: state.settings.awayGoalSilence,
             scriptTemplates: { ...state.settings.scriptTemplates },
             keyBindings: clonedBindings,
           },
@@ -805,6 +806,10 @@ export const useAppStore = create<AppStoreState>()(
           fadeOutDurationMs:
             profile.settings?.fadeOutDurationMs ??
             state.settings.fadeOutDurationMs,
+          awayGoalSilence:
+            typeof profile.settings?.awayGoalSilence === 'boolean'
+              ? profile.settings.awayGoalSilence
+              : state.settings.awayGoalSilence,
           scriptTemplates: profile.settings?.scriptTemplates
             ? { ...profile.settings.scriptTemplates }
             : { ...state.settings.scriptTemplates },

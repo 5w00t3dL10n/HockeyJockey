@@ -24,6 +24,7 @@ interface GoalFlowModalProps {
   isMusicPlaying: boolean;
   onStartHomeGoalMusic: () => void;
   onStartAwayRestartMusic: () => void;
+  onToggleAwayGoalSilence: () => void;
   onDuckAudio: () => void;
   onRestoreAudio: () => void;
   onFadeOutAndClose: () => void;
@@ -43,6 +44,7 @@ export const GoalFlowModal = forwardRef<
     isMusicPlaying,
     onStartHomeGoalMusic,
     onStartAwayRestartMusic,
+    onToggleAwayGoalSilence,
     onDuckAudio,
     onRestoreAudio,
     onFadeOutAndClose,
@@ -63,9 +65,19 @@ export const GoalFlowModal = forwardRef<
       initTriggeredRef.current = true;
       if (team.id === 'home') {
         onStartHomeGoalMusic();
+      } else if (team.id === 'away' && !settings.awayGoalSilence) {
+        onStartAwayRestartMusic();
       }
     }
-  }, [team.id, onStartHomeGoalMusic]);
+  }, [
+    team.id,
+    settings.awayGoalSilence,
+    onStartHomeGoalMusic,
+    onStartAwayRestartMusic,
+  ]);
+
+  const shouldDuckOnScript =
+    isMusicPlaying || team.id === 'home' || !settings.awayGoalSilence;
 
   const enterScriptStep = (shouldDuck: boolean) => {
     setStep('script');
@@ -101,7 +113,7 @@ export const GoalFlowModal = forwardRef<
 
     if (step === 'assist1') {
       if (!currentInput) {
-        enterScriptStep(isMusicPlaying || team.id === 'home');
+        enterScriptStep(shouldDuckOnScript);
         return;
       }
       setAssist1Number(currentInput);
@@ -115,7 +127,7 @@ export const GoalFlowModal = forwardRef<
         setAssist2Number(currentInput);
       }
       setCurrentInput('');
-      enterScriptStep(isMusicPlaying || team.id === 'home');
+      enterScriptStep(shouldDuckOnScript);
     }
   };
 
@@ -128,7 +140,7 @@ export const GoalFlowModal = forwardRef<
       setCurrentInput('');
       setAssist1Number('');
       setAssist2Number('');
-      enterScriptStep(isMusicPlaying || team.id === 'home');
+      enterScriptStep(shouldDuckOnScript);
       return;
     }
 
@@ -140,7 +152,7 @@ export const GoalFlowModal = forwardRef<
       }
       setAssist2Number('');
       setCurrentInput('');
-      enterScriptStep(isMusicPlaying || team.id === 'home');
+      enterScriptStep(shouldDuckOnScript);
       return;
     }
 
@@ -149,7 +161,7 @@ export const GoalFlowModal = forwardRef<
         setAssist2Number(currentInput);
       }
       setCurrentInput('');
-      enterScriptStep(isMusicPlaying || team.id === 'home');
+      enterScriptStep(shouldDuckOnScript);
     }
   };
 
@@ -167,7 +179,7 @@ export const GoalFlowModal = forwardRef<
       setAssist2Number('');
     }
     setCurrentInput('');
-    enterScriptStep(isMusicPlaying || team.id === 'home');
+    enterScriptStep(shouldDuckOnScript);
   };
 
   useImperativeHandle(
@@ -178,7 +190,14 @@ export const GoalFlowModal = forwardRef<
       onEnter: handleNext,
       onEscape: onCancelClose,
     }),
-    [step, currentInput, isMusicPlaying, team.id, onCancelClose],
+    [
+      step,
+      currentInput,
+      isMusicPlaying,
+      team.id,
+      settings.awayGoalSilence,
+      onCancelClose,
+    ],
   );
 
   const liveLookupName =
@@ -287,9 +306,30 @@ export const GoalFlowModal = forwardRef<
           {step !== 'script' ? (
             <div className="space-y-6">
               {team.id === 'away' && (
-                <div className="rounded-xl border border-orange-500/30 bg-orange-950/30 px-4 py-2.5 text-xs font-medium text-orange-200">
-                  Sportslig tystnad vid bortamål. Använd knappen{' '}
-                  <strong>STARTA OMSTART / PEPP-LÅT</strong> ovan inför tekning vid behov.
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-orange-500/30 bg-orange-950/30 px-4 py-2.5 text-xs font-medium text-orange-200">
+                  <div>
+                    {settings.awayGoalSilence ? (
+                      <>
+                        Sportslig tystnad vid bortamål. Använd knappen{' '}
+                        <strong>STARTA OMSTART / PEPP-LÅT</strong> ovan inför
+                        tekning vid behov.
+                      </>
+                    ) : (
+                      <>
+                        Automatisk musik vid bortamål är aktiverad — låt från
+                        omstartslistan startar direkt.
+                      </>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onToggleAwayGoalSilence}
+                    className="shrink-0 rounded-lg border border-orange-400/40 bg-orange-900/40 px-3 py-1.5 text-xs font-bold text-orange-100 hover:bg-orange-800/60 transition-colors cursor-pointer"
+                  >
+                    {settings.awayGoalSilence
+                      ? 'Byt till automatisk musik'
+                      : 'Byt till sportslig tystnad'}
+                  </button>
                 </div>
               )}
 

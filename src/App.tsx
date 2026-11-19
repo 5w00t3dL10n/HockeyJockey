@@ -49,6 +49,7 @@ export function App() {
   const matchProfiles = useAppStore((s) => s.matchProfiles);
   const activeProfileId = useAppStore((s) => s.activeProfileId);
   const advancePadRotation = useAppStore((s) => s.advancePadRotation);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const loadRosterFromLibrary = useAppStore((s) => s.loadRosterFromLibrary);
   const activateMatchProfile = useAppStore((s) => s.activateMatchProfile);
 
@@ -406,6 +407,9 @@ export function App() {
           isMusicPlaying={audioState.isPlaying}
           onStartHomeGoalMusic={handleStartHomeGoalMusic}
           onStartAwayRestartMusic={handleStartAwayRestartMusic}
+          onToggleAwayGoalSilence={() =>
+            updateSettings({ awayGoalSilence: !settings.awayGoalSilence })
+          }
           onDuckAudio={() =>
             void audioController.duckVolume(settings.duckVolume, 400)
           }

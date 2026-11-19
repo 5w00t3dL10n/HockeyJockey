@@ -721,6 +721,345 @@ console.log(JSON.stringify({
         self.assertEqual(with_hotkey["settings"]["keyBindings"]["pads"].get("legacy-pad-hype"), "9")
         self.assertEqual(with_hotkey["soundPads"][1].get("hotkey"), "9")
 
+    def test_10_extract_spotify_track_id(self) -> None:
+        """Verify extractSpotifyTrackId extracts IDs from track URLs, intl-sv URLs, URIs, and returns null for invalid inputs."""
+        script = """
+import { extractSpotifyTrackId } from './src/utils/domain.ts';
+
+const result = {
+  exampleUrl: extractSpotifyTrackId('https://open.spotify.com/track/4QcBuV31ukMvsvviytKjWx?si=ccd5352978464589'),
+  intlSvWithQuery: extractSpotifyTrackId('https://open.spotify.com/intl-sv/track/4QcBuV31ukMvsvviytKjWx?si=ccd5352978464589'),
+  intlSvPlain: extractSpotifyTrackId('https://open.spotify.com/intl-sv/track/4QcBuV31ukMvsvviytKjWx'),
+  spotifyUri: extractSpotifyTrackId('spotify:track:4QcBuV31ukMvsvviytKjWx'),
+  trimmedUrl: extractSpotifyTrackId('  https://open.spotify.com/track/4QcBuV31ukMvsvviytKjWx?si=ccd5352978464589  '),
+  invalidEmpty: extractSpotifyTrackId(''),
+  invalidWhitespace: extractSpotifyTrackId('   '),
+  invalidGarbage: extractSpotifyTrackId('not-a-spotify-link'),
+  invalidHost: extractSpotifyTrackId('https://example.com/track/4QcBuV31ukMvsvviytKjWx'),
+  invalidPlaylist: extractSpotifyTrackId('https://open.spotify.com/playlist/4QcBuV31ukMvsvviytKjWx'),
+  invalidAlbum: extractSpotifyTrackId('https://open.spotify.com/album/4QcBuV31ukMvsvviytKjWx'),
+  invalidShortId: extractSpotifyTrackId('https://open.spotify.com/track/4QcBuV31ukM'),
+  invalidUriType: extractSpotifyTrackId('spotify:album:4QcBuV31ukMvsvviytKjWx'),
+  invalidUriChars: extractSpotifyTrackId('spotify:track:4QcBuV31ukMvsvviytKjW!'),
+};
+console.log(JSON.stringify(result));
+"""
+        res = run_ts_script(script)
+        expected_id = "4QcBuV31ukMvsvviytKjWx"
+        self.assertEqual(res["exampleUrl"], expected_id)
+        self.assertEqual(res["intlSvWithQuery"], expected_id)
+        self.assertEqual(res["intlSvPlain"], expected_id)
+        self.assertEqual(res["spotifyUri"], expected_id)
+        self.assertEqual(res["trimmedUrl"], expected_id)
+
+        for invalid_key in (
+            "invalidEmpty",
+            "invalidWhitespace",
+            "invalidGarbage",
+            "invalidHost",
+            "invalidPlaylist",
+            "invalidAlbum",
+            "invalidShortId",
+            "invalidUriType",
+            "invalidUriChars",
+        ):
+            self.assertIsNone(
+                res[invalid_key],
+                f"Expected null for {invalid_key}, got {res[invalid_key]!r}",
+            )
+
+    def test_11_parse_spotify_metadata_payload(self) -> None:
+        """Verify parseSpotifyMetadataPayload across Web API, Embed __NEXT_DATA__/HTML, oEmbed, and invalid payloads."""
+        script = """
+import { parseSpotifyMetadataPayload } from './src/utils/domain.ts';
+
+const webApiMultiArtist = parseSpotifyMetadataPayload({
+  id: '4QcBuV31ukMvsvviytKjWx',
+  name: 'Goal Horn Anthem',
+  artists: [
+    { name: 'Artist Ett' },
+    { name: 'Artist Två' },
+    { name: 'DJ Hockey' },
+  ],
+});
+
+const webApiJsonString = parseSpotifyMetadataPayload(JSON.stringify({
+  name: 'Powerplay Riff',
+  artists: [{ name: 'Band A' }, { name: 'Band B' }],
+}));
+
+const embedNextDataObj = parseSpotifyMetadataPayload({
+  props: {
+    pageProps: {
+      state: {
+        data: {
+          entity: {
+            name: 'Embed Track Title',
+            artists: [{ name: 'Embed Artist 1' }, { name: 'Embed Artist 2' }],
+          },
+        },
+      },
+    },
+  },
+});
+
+const embedNextDataSubtitleFallback = parseSpotifyMetadataPayload(JSON.stringify({
+  props: {
+    pageProps: {
+      state: {
+        data: {
+          entity: {
+            title: 'Embed Subtitle Track',
+            subtitle: 'Embed Subtitle Artist',
+          },
+        },
+      },
+    },
+  },
+}));
+
+const embedHtmlNextData = parseSpotifyMetadataPayload(`
+  <!doctype html>
+  <html>
+    <head><title>Spotify</title></head>
+    <body>
+      <script id="__NEXT_DATA__" type="application/json">
+        {"props":{"pageProps":{"state":{"data":{"entity":{"name":"HTML NextData Song","artists":[{"name":"NextData Artist 1"},{"name":"NextData Artist 2"}]}}}}}}
+      </script>
+    </body>
+  </html>
+`);
+
+const embedHtmlTitleFallbackEn = parseSpotifyMetadataPayload(`
+  <!doctype html>
+  <html>
+    <head>
+      <title>Hockey Victory - song and lyrics by Arena Rockers | Spotify</title>
+    </head>
+    <body></body>
+  </html>
+`);
+
+const embedHtmlTitleFallbackSv = parseSpotifyMetadataPayload(`
+  <!doctype html>
+  <html>
+    <head>
+      <title>Målfest i Hallen - låt och text av Hemmalaget | Spotify</title>
+    </head>
+    <body></body>
+  </html>
+`);
+
+const embedHtmlTitleFallbackDashEntities = parseSpotifyMetadataPayload(`
+  <!doctype html>
+  <html>
+    <head>
+      <script id="__NEXT_DATA__" type="application/json">{broken json</script>
+      <title>Rock &amp; Goal - The Skates &amp; Co | Spotify</title>
+    </head>
+    <body></body>
+  </html>
+`);
+
+const oembedTitleDashArtist = parseSpotifyMetadataPayload({
+  title: 'Slapshot - Puck Rockers',
+  author_name: 'Spotify',
+  provider_name: 'Spotify',
+});
+
+const oembedAuthorName = parseSpotifyMetadataPayload({
+  title: 'Sudden Death',
+  author_name: 'Arena Brass',
+  provider_name: 'Spotify',
+});
+
+const oembedTitleDashNoAuthor = parseSpotifyMetadataPayload({
+  title: 'Overtime Hero - Ice Breakers',
+});
+
+const invalidNull = parseSpotifyMetadataPayload(null);
+const invalidUndefined = parseSpotifyMetadataPayload(undefined);
+const invalidNumber = parseSpotifyMetadataPayload(12345);
+const invalidArray = parseSpotifyMetadataPayload(['track']);
+const invalidEmptyObj = parseSpotifyMetadataPayload({});
+const invalidEmptyStr = parseSpotifyMetadataPayload('');
+const invalidWhitespace = parseSpotifyMetadataPayload('   ');
+const invalidPlainText = parseSpotifyMetadataPayload('plain text without metadata');
+const invalidGenericHtml = parseSpotifyMetadataPayload('<html><head><title>Spotify – Web Player</title></head></html>');
+const invalidBlankNameWebApi = parseSpotifyMetadataPayload({ name: '   ', artists: [{ name: 'Ghost' }] });
+const invalidBlankTitleOembed = parseSpotifyMetadataPayload({ title: '  ', author_name: 'Artist' });
+
+console.log(JSON.stringify({
+  webApiMultiArtist,
+  webApiJsonString,
+  embedNextDataObj,
+  embedNextDataSubtitleFallback,
+  embedHtmlNextData,
+  embedHtmlTitleFallbackEn,
+  embedHtmlTitleFallbackSv,
+  embedHtmlTitleFallbackDashEntities,
+  oembedTitleDashArtist,
+  oembedAuthorName,
+  oembedTitleDashNoAuthor,
+  invalidNull,
+  invalidUndefined,
+  invalidNumber,
+  invalidArray,
+  invalidEmptyObj,
+  invalidEmptyStr,
+  invalidWhitespace,
+  invalidPlainText,
+  invalidGenericHtml,
+  invalidBlankNameWebApi,
+  invalidBlankTitleOembed,
+}));
+"""
+        res = run_ts_script(script)
+        self.assertEqual(
+            res["webApiMultiArtist"],
+            {"title": "Goal Horn Anthem", "artist": "Artist Ett, Artist Två, DJ Hockey"},
+        )
+        self.assertEqual(
+            res["webApiJsonString"],
+            {"title": "Powerplay Riff", "artist": "Band A, Band B"},
+        )
+        self.assertEqual(
+            res["embedNextDataObj"],
+            {"title": "Embed Track Title", "artist": "Embed Artist 1, Embed Artist 2"},
+        )
+        self.assertEqual(
+            res["embedNextDataSubtitleFallback"],
+            {"title": "Embed Subtitle Track", "artist": "Embed Subtitle Artist"},
+        )
+        self.assertEqual(
+            res["embedHtmlNextData"],
+            {"title": "HTML NextData Song", "artist": "NextData Artist 1, NextData Artist 2"},
+        )
+        self.assertEqual(
+            res["embedHtmlTitleFallbackEn"],
+            {"title": "Hockey Victory", "artist": "Arena Rockers"},
+        )
+        self.assertEqual(
+            res["embedHtmlTitleFallbackSv"],
+            {"title": "Målfest i Hallen", "artist": "Hemmalaget"},
+        )
+        self.assertEqual(
+            res["embedHtmlTitleFallbackDashEntities"],
+            {"title": "Rock & Goal", "artist": "The Skates & Co"},
+        )
+        self.assertEqual(
+            res["oembedTitleDashArtist"],
+            {"title": "Slapshot", "artist": "Puck Rockers"},
+        )
+        self.assertEqual(
+            res["oembedAuthorName"],
+            {"title": "Sudden Death", "artist": "Arena Brass"},
+        )
+        self.assertEqual(
+            res["oembedTitleDashNoAuthor"],
+            {"title": "Overtime Hero", "artist": "Ice Breakers"},
+        )
+
+        for invalid_key in (
+            "invalidNull",
+            "invalidUndefined",
+            "invalidNumber",
+            "invalidArray",
+            "invalidEmptyObj",
+            "invalidEmptyStr",
+            "invalidWhitespace",
+            "invalidPlainText",
+            "invalidGenericHtml",
+            "invalidBlankNameWebApi",
+            "invalidBlankTitleOembed",
+        ):
+            self.assertIsNone(
+                res[invalid_key],
+                f"Expected null for {invalid_key}, got {res[invalid_key]!r}",
+            )
+
+    def test_12_away_goal_silence_sanitize_match_config(self) -> None:
+        """Verify awayGoalSilence defaults to true in legacy configs and preserves explicit true/false in settings and MatchProfile.settings."""
+        script = """
+import { DEFAULT_SETTINGS, DEFAULT_SOUND_PADS } from './src/data/defaults.ts';
+import { sanitizeMatchConfig } from './src/utils/domain.ts';
+
+const legacyWithoutAwayGoalSilence = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    duckVolume: 0.25,
+    fadeOutDurationMs: 500,
+  },
+});
+
+const missingSettingsCompletely = sanitizeMatchConfig({
+  version: 1,
+});
+
+const invalidTypeAwayGoalSilence = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    awayGoalSilence: 'false',
+  },
+});
+
+const explicitFalse = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    awayGoalSilence: false,
+  },
+  matchProfiles: [
+    {
+      id: 'prof-false',
+      name: 'Profil Tystnad AV',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        duckVolume: 0.3,
+        awayGoalSilence: false,
+      },
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    },
+    {
+      id: 'prof-true',
+      name: 'Profil Tystnad PÅ',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        duckVolume: 0.2,
+        awayGoalSilence: true,
+      },
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    },
+  ],
+});
+
+const explicitTrue = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    awayGoalSilence: true,
+  },
+});
+
+console.log(JSON.stringify({
+  defaultSetting: DEFAULT_SETTINGS.awayGoalSilence,
+  legacyValue: legacyWithoutAwayGoalSilence.settings.awayGoalSilence,
+  missingSettingsValue: missingSettingsCompletely.settings.awayGoalSilence,
+  invalidTypeValue: invalidTypeAwayGoalSilence.settings.awayGoalSilence,
+  explicitFalseSetting: explicitFalse.settings.awayGoalSilence,
+  explicitTrueSetting: explicitTrue.settings.awayGoalSilence,
+  profileFalseSetting: explicitFalse.matchProfiles?.find((p) => p.id === 'prof-false')?.settings?.awayGoalSilence,
+  profileTrueSetting: explicitFalse.matchProfiles?.find((p) => p.id === 'prof-true')?.settings?.awayGoalSilence,
+}));
+"""
+        res = run_ts_script(script)
+        self.assertIs(res["defaultSetting"], True)
+        self.assertIs(res["legacyValue"], True)
+        self.assertIs(res["missingSettingsValue"], True)
+        self.assertIs(res["invalidTypeValue"], True)
+        self.assertIs(res["explicitFalseSetting"], False)
+        self.assertIs(res["explicitTrueSetting"], True)
+        self.assertIs(res["profileFalseSetting"], False)
+        self.assertIs(res["profileTrueSetting"], True)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

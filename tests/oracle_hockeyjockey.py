@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md AND section 4.2 of 05_oracle_profiles_hotkeys_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, AND section 4.2 of 07_oracle_away_goal_and_metadata_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
@@ -11,6 +11,8 @@ Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md AND secti
 7. Zustand `useAppStore` MatchProfile deterministic switching (`saveCurrentAsMatchProfile` -> `activateMatchProfile`).
 8. Zustand `useAppStore` customizable hotkeys (`setActionHotkey`, `setPadHotkey` conflict transfer & pad.hotkey sync, `resetHotkeysToDefault`).
 9. Zustand `useAppStore` full JSON export/import round-trip (`exportConfigJson` -> `importConfigJson`).
+10. Zustand `useAppStore` `awayGoalSilence` default (`true`), MatchProfile switching, and JSON export/import preservation.
+11. Spotify track metadata (`fetchSpotifyTrackMetadata` graceful `null` on invalid URLs & `extractSpotifyTrackId` + `parseSpotifyMetadataPayload` with user example URL).
 
 Deterministic exit codes:
 - 0: All oracle checks passed.
@@ -915,6 +917,315 @@ console.log(JSON.stringify({
         raise AssertionError("Jersey '00' lost during store exportConfigJson -> importConfigJson round-trip")
 
 
+def check_store_away_goal_silence() -> None:
+    """Oracle 10: Verify awayGoalSilence default, MatchProfile switching, and JSON export/import round-trip."""
+    script = """
+import { useAppStore } from './src/store/useAppStore.ts';
+
+useAppStore.getState().resetToDefaults();
+const defaultAwayGoalSilence = useAppStore.getState().settings.awayGoalSilence;
+
+// Set awayGoalSilence to false and save as MatchProfile
+useAppStore.getState().updateSettings({ awayGoalSilence: false });
+const afterUpdateFalse = useAppStore.getState().settings.awayGoalSilence;
+const silentFalseProfileId = useAppStore.getState().saveCurrentAsMatchProfile(
+  'Bortamål Tystnad AV',
+  'U14',
+  false,
+);
+
+// Create another MatchProfile with awayGoalSilence: true
+useAppStore.getState().updateSettings({ awayGoalSilence: true });
+const afterUpdateTrue = useAppStore.getState().settings.awayGoalSilence;
+const silentTrueProfileId = useAppStore.getState().saveCurrentAsMatchProfile(
+  'Bortamål Tystnad PÅ',
+  'Senior',
+  false,
+);
+
+// Switch to default/true profile then back to silentFalseProfileId
+const activatedDefaultTrue = useAppStore.getState().activateMatchProfile('profile-u12-standard');
+const valOnDefaultProfile = useAppStore.getState().settings.awayGoalSilence;
+
+const activatedCustomTrue = useAppStore.getState().activateMatchProfile(silentTrueProfileId);
+const valOnCustomTrueProfile = useAppStore.getState().settings.awayGoalSilence;
+
+const activatedCustomFalse = useAppStore.getState().activateMatchProfile(silentFalseProfileId);
+const valRestoredFalseProfile = useAppStore.getState().settings.awayGoalSilence;
+
+// JSON export/import round-trip preserving awayGoalSilence: false and both MatchProfiles
+const exportedFalseJson = useAppStore.getState().exportConfigJson();
+useAppStore.getState().resetToDefaults();
+const valAfterResetBeforeImport = useAppStore.getState().settings.awayGoalSilence;
+
+const importedFalseResult = useAppStore.getState().importConfigJson(exportedFalseJson);
+const valAfterImportFalse = useAppStore.getState().settings.awayGoalSilence;
+
+const switchTrueAfterImport = useAppStore.getState().activateMatchProfile(silentTrueProfileId);
+const valSwitchTrueAfterImport = useAppStore.getState().settings.awayGoalSilence;
+
+const switchFalseAfterImport = useAppStore.getState().activateMatchProfile(silentFalseProfileId);
+const valSwitchFalseAfterImport = useAppStore.getState().settings.awayGoalSilence;
+
+// JSON export/import round-trip preserving awayGoalSilence: true
+useAppStore.getState().activateMatchProfile(silentTrueProfileId);
+const exportedTrueJson = useAppStore.getState().exportConfigJson();
+useAppStore.getState().updateSettings({ awayGoalSilence: false });
+const importedTrueResult = useAppStore.getState().importConfigJson(exportedTrueJson);
+const valAfterImportTrue = useAppStore.getState().settings.awayGoalSilence;
+
+console.log(JSON.stringify({
+  defaultAwayGoalSilence,
+  afterUpdateFalse,
+  silentFalseProfileId,
+  afterUpdateTrue,
+  silentTrueProfileId,
+  activatedDefaultTrue,
+  valOnDefaultProfile,
+  activatedCustomTrue,
+  valOnCustomTrueProfile,
+  activatedCustomFalse,
+  valRestoredFalseProfile,
+  valAfterResetBeforeImport,
+  importedFalseSetting: importedFalseResult.settings.awayGoalSilence,
+  valAfterImportFalse,
+  switchTrueAfterImport,
+  valSwitchTrueAfterImport,
+  switchFalseAfterImport,
+  valSwitchFalseAfterImport,
+  importedTrueSetting: importedTrueResult.settings.awayGoalSilence,
+  valAfterImportTrue,
+}));
+"""
+    res = run_ts_script(script)
+
+    if res["defaultAwayGoalSilence"] is not True:
+        raise AssertionError(
+            f"Expected default settings.awayGoalSilence === True, got {res['defaultAwayGoalSilence']!r}"
+        )
+    if res["afterUpdateFalse"] is not False:
+        raise AssertionError(
+            f"updateSettings({{ awayGoalSilence: false }}) failed: {res['afterUpdateFalse']!r}"
+        )
+    if res["afterUpdateTrue"] is not True:
+        raise AssertionError(
+            f"updateSettings({{ awayGoalSilence: true }}) failed: {res['afterUpdateTrue']!r}"
+        )
+    if not res["activatedDefaultTrue"] or res["valOnDefaultProfile"] is not True:
+        raise AssertionError(
+            f"Activating profile with awayGoalSilence: true failed: {res['valOnDefaultProfile']!r}"
+        )
+    if not res["activatedCustomTrue"] or res["valOnCustomTrueProfile"] is not True:
+        raise AssertionError(
+            f"Activating custom profile with awayGoalSilence: true failed: {res['valOnCustomTrueProfile']!r}"
+        )
+    if not res["activatedCustomFalse"] or res["valRestoredFalseProfile"] is not False:
+        raise AssertionError(
+            f"Switching back to profile with awayGoalSilence: false did not restore false: {res['valRestoredFalseProfile']!r}"
+        )
+    if res["valAfterResetBeforeImport"] is not True:
+        raise AssertionError("resetToDefaults did not restore awayGoalSilence === True")
+    if res["importedFalseSetting"] is not False or res["valAfterImportFalse"] is not False:
+        raise AssertionError(
+            f"JSON export/import did not preserve awayGoalSilence === false: "
+            f"ret={res['importedFalseSetting']!r}, store={res['valAfterImportFalse']!r}"
+        )
+    if not res["switchTrueAfterImport"] or res["valSwitchTrueAfterImport"] is not True:
+        raise AssertionError(
+            f"Profile awayGoalSilence: true lost after JSON import: {res['valSwitchTrueAfterImport']!r}"
+        )
+    if not res["switchFalseAfterImport"] or res["valSwitchFalseAfterImport"] is not False:
+        raise AssertionError(
+            f"Profile awayGoalSilence: false lost after JSON import: {res['valSwitchFalseAfterImport']!r}"
+        )
+    if res["importedTrueSetting"] is not True or res["valAfterImportTrue"] is not True:
+        raise AssertionError(
+            f"JSON export/import did not preserve awayGoalSilence === true: "
+            f"ret={res['importedTrueSetting']!r}, store={res['valAfterImportTrue']!r}"
+        )
+
+
+def check_spotify_track_metadata() -> None:
+    """Oracle 11: Verify fetchSpotifyTrackMetadata graceful null on invalid links & compatibility with user example URL."""
+    example_url = "https://open.spotify.com/track/4QcBuV31ukMvsvviytKjWx?si=ccd5352978464589"
+    script = f"""
+import {{ fetchSpotifyTrackMetadata }} from './src/services/spotifyMetadata.ts';
+import {{
+  extractSpotifyTrackId,
+  parseSpotifyMetadataPayload,
+  tryParseSpotifyUri,
+}} from './src/utils/domain.ts';
+
+const exampleUrl = {json.dumps(example_url)};
+const expectedTrackId = '4QcBuV31ukMvsvviytKjWx';
+const expectedTrackUri = 'spotify:track:4QcBuV31ukMvsvviytKjWx';
+
+// 1. Invalid inputs to fetchSpotifyTrackMetadata must return null without throwing
+const invalidResults = {{
+  empty: await fetchSpotifyTrackMetadata(''),
+  garbage: await fetchSpotifyTrackMetadata('not-a-spotify-link'),
+  nonTrackUrl: await fetchSpotifyTrackMetadata('https://open.spotify.com/playlist/4QcBuV31ukMvsvviytKjWx'),
+  wrongHost: await fetchSpotifyTrackMetadata('https://example.com/track/4QcBuV31ukMvsvviytKjWx'),
+}};
+
+// 2. Domain extraction & URI normalization on user's example link
+const extractedId = extractSpotifyTrackId(exampleUrl);
+const parsedUriResult = tryParseSpotifyUri(exampleUrl);
+
+// 3. Payload parsing compatibility (Web API, Embed __NEXT_DATA__ HTML, oEmbed)
+const parsedWebApi = parseSpotifyMetadataPayload({{
+  id: extractedId,
+  name: 'Example Arena Song',
+  artists: [{{ name: 'Artist One' }}, {{ name: 'Artist Two' }}],
+}});
+
+const parsedEmbedHtml = parseSpotifyMetadataPayload(`
+  <html>
+    <head><title>Spotify</title></head>
+    <body>
+      <script id="__NEXT_DATA__" type="application/json">
+        {{"props":{{"pageProps":{{"state":{{"data":{{"entity":{{"name":"Example Embed Track","artists":[{{"name":"Embed Band"}}]}}}}}}}}}}}}
+      </script>
+    </body>
+  </html>
+`);
+
+const parsedOembed = parseSpotifyMetadataPayload({{
+  title: 'Example OEmbed Track - OEmbed Artist',
+  author_name: 'Spotify',
+}});
+
+// 4. Deterministic fetchSpotifyTrackMetadata paths using controlled globalThis.fetch
+const originalFetch = globalThis.fetch;
+let proxyResult = null;
+let oembedFallbackResult = null;
+let networkFailureResult = 'NOT_NULL';
+
+try {{
+  // 4a. Vite /api/spotify-meta path
+  globalThis.fetch = async (url) => {{
+    const urlStr = String(url);
+    if (urlStr.includes('/api/spotify-meta?id=4QcBuV31ukMvsvviytKjWx')) {{
+      return new Response(
+        JSON.stringify({{
+          trackId: expectedTrackId,
+          trackUri: expectedTrackUri,
+          title: 'Proxy Resolved Title',
+          artist: 'Proxy Resolved Artist',
+        }}),
+        {{ status: 200, headers: {{ 'Content-Type': 'application/json' }} }},
+      );
+    }}
+    return new Response('Not Found', {{ status: 404 }});
+  }};
+  proxyResult = await fetchSpotifyTrackMetadata(exampleUrl);
+
+  // 4b. Fallback to /oembed when /api/spotify-meta returns 502
+  globalThis.fetch = async (url) => {{
+    const urlStr = String(url);
+    if (urlStr.includes('/api/spotify-meta')) {{
+      return new Response(JSON.stringify({{ error: 'upstream error' }}), {{ status: 502 }});
+    }}
+    if (urlStr.includes('https://open.spotify.com/oembed')) {{
+      return new Response(
+        JSON.stringify({{
+          title: 'OEmbed Fallback Title - OEmbed Fallback Artist',
+          author_name: 'Spotify',
+        }}),
+        {{ status: 200, headers: {{ 'Content-Type': 'application/json' }} }},
+      );
+    }}
+    return new Response('Not Found', {{ status: 404 }});
+  }};
+  oembedFallbackResult = await fetchSpotifyTrackMetadata(exampleUrl);
+
+  // 4c. Complete network outage -> must resolve gracefully to null without throwing
+  globalThis.fetch = async () => {{
+    throw new Error('Simulated offline network failure');
+  }};
+  networkFailureResult = await fetchSpotifyTrackMetadata(exampleUrl);
+}} finally {{
+  globalThis.fetch = originalFetch;
+}}
+
+console.log(JSON.stringify({{
+  invalidResults,
+  extractedId,
+  parsedUriResult,
+  parsedWebApi,
+  parsedEmbedHtml,
+  parsedOembed,
+  proxyResult,
+  oembedFallbackResult,
+  networkFailureResult,
+}}));
+"""
+    res = run_ts_script(script)
+
+    for key, val in res["invalidResults"].items():
+        if val is not None:
+            raise AssertionError(
+                f"fetchSpotifyTrackMetadata({key}) expected null, got {val!r}"
+            )
+
+    if res["extractedId"] != "4QcBuV31ukMvsvviytKjWx":
+        raise AssertionError(
+            f"extractSpotifyTrackId mismatch on example URL: {res['extractedId']!r}"
+        )
+    if res["parsedUriResult"] != {
+        "ok": True,
+        "uri": "spotify:track:4QcBuV31ukMvsvviytKjWx",
+    }:
+        raise AssertionError(
+            f"tryParseSpotifyUri mismatch on example URL: {res['parsedUriResult']!r}"
+        )
+
+    if res["parsedWebApi"] != {
+        "title": "Example Arena Song",
+        "artist": "Artist One, Artist Two",
+    }:
+        raise AssertionError(f"Unexpected parsedWebApi result: {res['parsedWebApi']!r}")
+    if res["parsedEmbedHtml"] != {
+        "title": "Example Embed Track",
+        "artist": "Embed Band",
+    }:
+        raise AssertionError(
+            f"Unexpected parsedEmbedHtml result: {res['parsedEmbedHtml']!r}"
+        )
+    if res["parsedOembed"] != {
+        "title": "Example OEmbed Track",
+        "artist": "OEmbed Artist",
+    }:
+        raise AssertionError(f"Unexpected parsedOembed result: {res['parsedOembed']!r}")
+
+    expected_proxy = {
+        "trackUri": "spotify:track:4QcBuV31ukMvsvviytKjWx",
+        "trackId": "4QcBuV31ukMvsvviytKjWx",
+        "title": "Proxy Resolved Title",
+        "artist": "Proxy Resolved Artist",
+    }
+    if res["proxyResult"] != expected_proxy:
+        raise AssertionError(
+            f"fetchSpotifyTrackMetadata proxy path mismatch: expected {expected_proxy!r}, got {res['proxyResult']!r}"
+        )
+
+    expected_oembed = {
+        "trackUri": "spotify:track:4QcBuV31ukMvsvviytKjWx",
+        "trackId": "4QcBuV31ukMvsvviytKjWx",
+        "title": "OEmbed Fallback Title",
+        "artist": "OEmbed Fallback Artist",
+    }
+    if res["oembedFallbackResult"] != expected_oembed:
+        raise AssertionError(
+            f"fetchSpotifyTrackMetadata oEmbed fallback mismatch: expected {expected_oembed!r}, got {res['oembedFallbackResult']!r}"
+        )
+
+    if res["networkFailureResult"] is not None:
+        raise AssertionError(
+            f"fetchSpotifyTrackMetadata did not return null on network failure: {res['networkFailureResult']!r}"
+        )
+
+
 def main() -> int:
     checks = [
         ("1. Production build & dist/ artifacts", check_production_build),
@@ -926,6 +1237,8 @@ def main() -> int:
         ("7. Store MatchProfile deterministic switching", check_store_match_profiles),
         ("8. Store hotkeys (setActionHotkey, setPadHotkey, conflicts, reset)", check_store_hotkeys),
         ("9. Store full JSON exportConfigJson -> importConfigJson round-trip", check_store_export_import_roundtrip),
+        ("10. Store awayGoalSilence default, MatchProfile switching & JSON round-trip", check_store_away_goal_silence),
+        ("11. Spotify track metadata (fetchSpotifyTrackMetadata & example link)", check_spotify_track_metadata),
     ]
 
     for label, fn in checks:

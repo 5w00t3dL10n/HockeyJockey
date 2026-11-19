@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, section 4.2 of 13_oracle_local_audio_files_init.md, section 4.2 of 15_oracle_embedded_media_archive_init.md, section 4.2 of 17_oracle_roster_lookup_and_teleprompter_init.md, AND section 4.2 of 19_oracle_track_transition_fade_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, section 4.2 of 13_oracle_local_audio_files_init.md, section 4.2 of 15_oracle_embedded_media_archive_init.md, section 4.2 of 17_oracle_roster_lookup_and_teleprompter_init.md, section 4.2 of 19_oracle_track_transition_fade_init.md, AND section 1 of 22_oracle_piper_tts_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
@@ -24,6 +24,9 @@ Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 
 20. Zustand `useAppStore.importEmbeddedMediaArchive` auto-creation in `'media_archive'` group, idempotency on repeated loads, user-deletion respect, and `resetToDefaults()` isolation.
 21. `DEFAULT_TEAMS.home` (*Sundsvall Hockey*) default roster (`#12`, `#6`, `#22`, `#00`), `useAppStore.upsertPlayer` jersey normalization (`'#12'` -> `'12'`), and `generateGoalScript` / `generatePenaltyScript` teleprompter output with full player names.
 22. `AudioController.playAt()` track transition fades: immediate target volume from silence (`isPlaying === false`), two-phase Fade Out to `0.0` before starting Track 2 at `0.0` followed by Fade In (`fadeOutMs: 150, fadeInMs: 150`) across Spotify -> Spotify, Local -> Local, and Spotify -> Local, plus direct cuts (`fadeWhenPlaying: false` and `fadeOutMs: 0, fadeInMs: 0`).
+23. Offline Piper CLI synthesis for both `sv_SE-nst-medium` and `sv_SE-lisa-medium` (`exit code 0`, `RIFF`/`WAVE` header, `> 10 000` bytes, clean temp directory teardown).
+24. `TtsService` + `AudioController` smart interaction in compiled TS/ESM (`duckVolume` before TTS -> `speak` -> `restoreVolume` after TTS, HTTP 503 Web Speech fallback with `restoreVolume`, `ttsRestoreMusicAfter: false`, and `stop()` mid-speech canceling late `restoreVolume`).
+25. TTS schema/profile/JSON round-trip (`DEFAULT_SETTINGS`, `MatchProfile`, `exportConfigJson`/`importConfigJson`) and static verification of `/api/tts/status`, `/api/tts` in `vite.config.ts` and AI-Speaker UI in components.
 
 Deterministic exit codes:
 - 0: All oracle checks passed.
@@ -38,8 +41,10 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -4065,6 +4070,738 @@ try {
     )
 
 
+def check_piper_cli_offline_synthesis() -> None:
+    """Oracle 23: Verify real offline Piper CLI synthesis for sv_SE-nst-medium and sv_SE-lisa-medium."""
+    piper_root_override = os.environ.get("PIPER_HOME", "").strip()
+    piper_root = Path(piper_root_override) if piper_root_override else (Path.home() / ".local" / "share" / "piper")
+    bin_path = piper_root / "piper" / "piper"
+    lib_dir = piper_root / "piper"
+    voices_dir = piper_root / "voices"
+
+    if not bin_path.is_file() or not os.access(bin_path, os.X_OK):
+        raise AssertionError(f"Piper binary missing or not executable: {bin_path}")
+
+    voices = ["sv_SE-nst-medium", "sv_SE-lisa-medium"]
+    sample_text = "Mål för Sundsvall Hockey! Målskytt nummer 22, Rasmus Karlsson.\n"
+
+    prev_ld = os.environ.get("LD_LIBRARY_PATH", "")
+    ld_library_path = f"{lib_dir}:{prev_ld}" if prev_ld else str(lib_dir)
+    piper_env = {**os.environ, "LD_LIBRARY_PATH": ld_library_path}
+
+    temp_dir_path: Path | None = None
+    with tempfile.TemporaryDirectory(prefix="hockeyjockey_piper_oracle_") as tmpdir:
+        temp_dir_path = Path(tmpdir)
+        for voice_id in voices:
+            onnx_path = voices_dir / f"{voice_id}.onnx"
+            config_path = voices_dir / f"{voice_id}.onnx.json"
+            if not onnx_path.is_file():
+                raise AssertionError(f"Missing Piper ONNX model for {voice_id}: {onnx_path}")
+            if not config_path.is_file():
+                raise AssertionError(f"Missing Piper config JSON for {voice_id}: {config_path}")
+
+            out_wav = temp_dir_path / f"{voice_id}.wav"
+            proc = subprocess.run(
+                [
+                    str(bin_path),
+                    "--model",
+                    str(onnx_path),
+                    "--config",
+                    str(config_path),
+                    "--length_scale",
+                    "1.0",
+                    "--output_file",
+                    str(out_wav),
+                    "-q",
+                ],
+                input=sample_text.encode("utf-8"),
+                env=piper_env,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            if proc.returncode != 0:
+                stderr_txt = proc.stderr.decode("utf-8", errors="replace")
+                raise AssertionError(
+                    f"Piper CLI synthesis failed for {voice_id} (exit={proc.returncode}): {stderr_txt}"
+                )
+            if not out_wav.is_file():
+                raise AssertionError(f"Piper CLI did not write WAV file for {voice_id}: {out_wav}")
+
+            wav_bytes = out_wav.read_bytes()
+            if len(wav_bytes) <= 10_000:
+                raise AssertionError(
+                    f"Piper WAV output too small for {voice_id}: {len(wav_bytes)} bytes (expected > 10000)"
+                )
+            if wav_bytes[:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+                raise AssertionError(
+                    f"Invalid RIFF/WAVE header for {voice_id}: {wav_bytes[:16]!r}"
+                )
+            riff_chunk_size = struct.unpack("<I", wav_bytes[4:8])[0]
+            if riff_chunk_size != len(wav_bytes) - 8:
+                raise AssertionError(
+                    f"RIFF chunk size mismatch for {voice_id}: header={riff_chunk_size}, actual={len(wav_bytes) - 8}"
+                )
+
+    if temp_dir_path is not None and temp_dir_path.exists():
+        raise AssertionError(f"Temporary Piper test directory was not cleaned up: {temp_dir_path}")
+
+
+def check_tts_service_audio_controller_smart_interaction() -> None:
+    """Oracle 24: Verify TtsService + AudioController smart interaction in compiled TS/ESM."""
+    script = """
+import { DEFAULT_SETTINGS } from './src/data/defaults.ts';
+import { AudioController } from './src/services/audioController.ts';
+import { TtsService } from './src/services/ttsService.ts';
+
+function buildFakeWavBuffer() {
+  const bytes = new Uint8Array(64);
+  bytes[0] = 0x52; bytes[1] = 0x49; bytes[2] = 0x46; bytes[3] = 0x46; // RIFF
+  bytes[4] = 56;
+  bytes[8] = 0x57; bytes[9] = 0x41; bytes[10] = 0x56; bytes[11] = 0x45; // WAVE
+  return bytes.buffer;
+}
+
+function createInstrumentedController() {
+  const events = [];
+  const setVolumeCalls = [];
+  const ctrl = new AudioController({
+    isReady: () => true,
+    getDeviceId: () => 'oracle-tts-device',
+    getDeviceName: () => 'Oracle DJ Booth',
+    playTrack: async (trackUri, positionMs) => {
+      events.push({ kind: 'spotify:playTrack', trackUri, positionMs, vol: ctrl.getState().volume });
+    },
+    pause: async () => {
+      events.push({ kind: 'spotify:pause' });
+    },
+    setVolume: async (vol) => {
+      setVolumeCalls.push(vol);
+      events.push({ kind: 'spotify:setVolume', vol });
+    },
+  });
+
+  const origDuck = ctrl.duckVolume.bind(ctrl);
+  const origRestore = ctrl.restoreVolume.bind(ctrl);
+
+  ctrl.duckVolume = async (targetDuckVolume, durationMs) => {
+    events.push({
+      kind: 'audioCtrl:duckVolume:start',
+      targetDuckVolume,
+      durationMs,
+      volBefore: ctrl.getState().volume,
+    });
+    await origDuck(targetDuckVolume, durationMs);
+    events.push({
+      kind: 'audioCtrl:duckVolume:end',
+      volAfter: ctrl.getState().volume,
+      isDuckedAfter: ctrl.getState().isDucked,
+    });
+  };
+
+  ctrl.restoreVolume = async (targetVolume, durationMs) => {
+    events.push({
+      kind: 'audioCtrl:restoreVolume:start',
+      targetVolume,
+      durationMs,
+      volBefore: ctrl.getState().volume,
+    });
+    await origRestore(targetVolume, durationMs);
+    events.push({
+      kind: 'audioCtrl:restoreVolume:end',
+      volAfter: ctrl.getState().volume,
+      isDuckedAfter: ctrl.getState().isDucked,
+    });
+  };
+
+  return { ctrl, events, setVolumeCalls };
+}
+
+const controllers = [];
+const baseSettings = {
+  ...DEFAULT_SETTINGS,
+  ttsEnabled: true,
+  ttsEngine: 'piper',
+  ttsVoiceId: 'sv_SE-nst-medium',
+  ttsRate: 1.0,
+  ttsVolume: 0.9,
+  duckVolume: 0.25,
+  ttsRestoreMusicAfter: true,
+};
+
+try {
+  // Scenario 1: Normal Piper TTS -> duckVolume BEFORE playWav -> restoreVolume AFTER playWav
+  const s1Inst = createInstrumentedController();
+  controllers.push(s1Inst.ctrl);
+  await s1Inst.ctrl.playAt('spotify:track:4uLU6hMCjMI75M1A2tKUQC', 0, 1.0);
+  s1Inst.events.length = 0;
+
+  const s1FetchCalls = [];
+  const s1SpeechCalls = [];
+  const s1States = [];
+  const s1Service = new TtsService({
+    fetch: async (url, init) => {
+      s1FetchCalls.push({
+        url,
+        method: init?.method ?? 'GET',
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : null,
+      });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+        arrayBuffer: async () => buildFakeWavBuffer(),
+      };
+    },
+    audioPlayer: {
+      playWav: async (buf, opts) => {
+        s1Inst.events.push({
+          kind: 'tts:playWav:start',
+          byteLength: buf.byteLength,
+          volume: opts.volume,
+          ctrlState: s1Inst.ctrl.getState(),
+          ttsState: s1Service.getState(),
+        });
+        await new Promise((r) => setTimeout(r, 60));
+        s1Inst.events.push({
+          kind: 'tts:playWav:end',
+          ctrlState: s1Inst.ctrl.getState(),
+        });
+      },
+      stop: () => {
+        s1Inst.events.push({ kind: 'tts:audioPlayer:stop' });
+      },
+    },
+    speechSynthesizer: {
+      isSupported: () => true,
+      speak: async (req) => {
+        s1SpeechCalls.push(req);
+      },
+      cancel: () => {},
+    },
+  });
+  const unsub1 = s1Service.subscribe((st) => {
+    s1States.push(st.playbackState);
+  });
+  await s1Service.speak('Mål för hemmalaget!', baseSettings, s1Inst.ctrl);
+  unsub1();
+  const s1FinalCtrl = s1Inst.ctrl.getState();
+  const s1FinalTts = s1Service.getState();
+  await s1Inst.ctrl.hardStop();
+
+  // Scenario 2: HTTP 503 from /api/tts -> Calm Tech Web Speech fallback + restoreVolume afterwards
+  const s2Inst = createInstrumentedController();
+  controllers.push(s2Inst.ctrl);
+  await s2Inst.ctrl.playAt('spotify:track:4uLU6hMCjMI75M1A2tKUQC', 0, 1.0);
+  s2Inst.events.length = 0;
+
+  let s2PlayWavCount = 0;
+  const s2Service = new TtsService({
+    fetch: async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: 'Piper ej tillgänglig' }),
+      arrayBuffer: async () => new ArrayBuffer(0),
+    }),
+    audioPlayer: {
+      playWav: async () => {
+        s2PlayWavCount += 1;
+      },
+      stop: () => {},
+    },
+    speechSynthesizer: {
+      isSupported: () => true,
+      speak: async (req) => {
+        s2Inst.events.push({
+          kind: 'tts:webspeech:start',
+          text: req.text,
+          lang: req.lang,
+          rate: req.rate,
+          volume: req.volume,
+          ctrlState: s2Inst.ctrl.getState(),
+          ttsState: s2Service.getState(),
+        });
+        await new Promise((r) => setTimeout(r, 60));
+        s2Inst.events.push({
+          kind: 'tts:webspeech:end',
+          ctrlState: s2Inst.ctrl.getState(),
+        });
+      },
+      cancel: () => {
+        s2Inst.events.push({ kind: 'tts:speech:cancel' });
+      },
+    },
+  });
+  await s2Service.speak('Utvisning för Sundsvall!', baseSettings, s2Inst.ctrl);
+  const s2FinalCtrl = s2Inst.ctrl.getState();
+  const s2FinalTts = s2Service.getState();
+  await s2Inst.ctrl.hardStop();
+
+  // Scenario 3: ttsRestoreMusicAfter: false skips restoreVolume
+  const s3Inst = createInstrumentedController();
+  controllers.push(s3Inst.ctrl);
+  await s3Inst.ctrl.playAt('spotify:track:4uLU6hMCjMI75M1A2tKUQC', 0, 1.0);
+  s3Inst.events.length = 0;
+
+  const s3Service = new TtsService({
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      arrayBuffer: async () => buildFakeWavBuffer(),
+    }),
+    audioPlayer: {
+      playWav: async () => {
+        s3Inst.events.push({
+          kind: 'tts:playWav:start',
+          ctrlState: s3Inst.ctrl.getState(),
+        });
+        await new Promise((r) => setTimeout(r, 40));
+        s3Inst.events.push({ kind: 'tts:playWav:end' });
+      },
+      stop: () => {},
+    },
+    speechSynthesizer: {
+      isSupported: () => true,
+      speak: async () => {},
+      cancel: () => {},
+    },
+  });
+  await s3Service.speak(
+    'Publikmeddelande utan automatisk återställning.',
+    { ...baseSettings, ttsRestoreMusicAfter: false },
+    s3Inst.ctrl,
+  );
+  const s3FinalCtrl = s3Inst.ctrl.getState();
+  const s3FinalTts = s3Service.getState();
+  await s3Inst.ctrl.hardStop();
+
+  // Scenario 4: ttsService.stop() mid-speech aborts sequence so no late restoreVolume triggers
+  const s4Inst = createInstrumentedController();
+  controllers.push(s4Inst.ctrl);
+  await s4Inst.ctrl.playAt('spotify:track:4uLU6hMCjMI75M1A2tKUQC', 0, 1.0);
+  s4Inst.events.length = 0;
+
+  let notifyPlayStarted = null;
+  const playStartedPromise = new Promise((resolve) => {
+    notifyPlayStarted = resolve;
+  });
+  let finishBlockedPlay = null;
+  let s4PlayerStopCalled = 0;
+  let s4SignalAbortedObserved = false;
+
+  const s4Service = new TtsService({
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      arrayBuffer: async () => buildFakeWavBuffer(),
+    }),
+    audioPlayer: {
+      playWav: async (_buf, opts) => {
+        s4Inst.events.push({
+          kind: 'tts:playWav:start',
+          ctrlState: s4Inst.ctrl.getState(),
+        });
+        notifyPlayStarted?.();
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 2500);
+          const done = () => {
+            clearTimeout(timer);
+            s4SignalAbortedObserved = Boolean(opts.signal?.aborted);
+            resolve();
+          };
+          finishBlockedPlay = done;
+          if (opts.signal?.aborted) {
+            done();
+          } else {
+            opts.signal?.addEventListener('abort', done, { once: true });
+          }
+        });
+        s4Inst.events.push({
+          kind: 'tts:playWav:aborted_or_ended',
+          aborted: Boolean(opts.signal?.aborted),
+        });
+      },
+      stop: () => {
+        s4PlayerStopCalled += 1;
+        s4Inst.events.push({ kind: 'tts:audioPlayer:stop' });
+        finishBlockedPlay?.();
+      },
+    },
+    speechSynthesizer: {
+      isSupported: () => true,
+      speak: async () => {},
+      cancel: () => {
+        s4Inst.events.push({ kind: 'tts:speech:cancel' });
+      },
+    },
+  });
+
+  const s4SpeakPromise = s4Service.speak(
+    'Långt utrop som stoppas mitt i...',
+    baseSettings,
+    s4Inst.ctrl,
+  );
+  await playStartedPromise;
+  await new Promise((r) => setTimeout(r, 20));
+  s4Service.stop();
+  await s4SpeakPromise;
+  // Wait longer than AudioController.restoreVolume(1.0, 400) to ensure no delayed restore runs
+  await new Promise((r) => setTimeout(r, 500));
+
+  const s4FinalCtrl = s4Inst.ctrl.getState();
+  const s4FinalTts = s4Service.getState();
+  await s4Inst.ctrl.hardStop();
+
+  console.log(JSON.stringify({
+    scenario1: {
+      events: s1Inst.events,
+      fetchCalls: s1FetchCalls,
+      speechCallsCount: s1SpeechCalls.length,
+      states: s1States,
+      finalCtrl: s1FinalCtrl,
+      finalTts: s1FinalTts,
+    },
+    scenario2: {
+      events: s2Inst.events,
+      playWavCount: s2PlayWavCount,
+      finalCtrl: s2FinalCtrl,
+      finalTts: s2FinalTts,
+    },
+    scenario3: {
+      events: s3Inst.events,
+      finalCtrl: s3FinalCtrl,
+      finalTts: s3FinalTts,
+    },
+    scenario4: {
+      events: s4Inst.events,
+      playerStopCalled: s4PlayerStopCalled,
+      signalAbortedObserved: s4SignalAbortedObserved,
+      finalCtrl: s4FinalCtrl,
+      finalTts: s4FinalTts,
+    },
+  }));
+} finally {
+  for (const c of controllers) {
+    c.dispose();
+  }
+}
+"""
+    res = run_ts_script(script, timeout=30)
+
+    # Assert Scenario 1: duckVolume -> playWav -> restoreVolume
+    s1 = res["scenario1"]
+    ev1 = s1["events"]
+    kinds1 = [e["kind"] for e in ev1]
+    required_seq1 = [
+        "audioCtrl:duckVolume:start",
+        "audioCtrl:duckVolume:end",
+        "tts:playWav:start",
+        "tts:playWav:end",
+        "audioCtrl:restoreVolume:start",
+        "audioCtrl:restoreVolume:end",
+    ]
+    indices1 = [kinds1.index(k) if k in kinds1 else -1 for k in required_seq1]
+    if any(idx < 0 for idx in indices1) or indices1 != sorted(indices1):
+        raise AssertionError(f"Scenario 1 event sequence invalid: {kinds1!r}")
+
+    duck_end1 = ev1[indices1[1]]
+    play_start1 = ev1[indices1[2]]
+    restore_end1 = ev1[indices1[5]]
+    if abs(duck_end1["volAfter"] - 0.25) > 1e-6 or duck_end1["isDuckedAfter"] is not True:
+        raise AssertionError(f"Scenario 1 duckVolume did not reach 0.25: {duck_end1!r}")
+    if (
+        abs(play_start1["ctrlState"]["volume"] - 0.25) > 1e-6
+        or play_start1["ctrlState"]["isDucked"] is not True
+        or play_start1["ttsState"]["playbackState"] != "speaking"
+    ):
+        raise AssertionError(f"Scenario 1 TTS started before music ducked to 0.25: {play_start1!r}")
+    if abs(restore_end1["volAfter"] - 1.0) > 1e-6 or restore_end1["isDuckedAfter"] is not False:
+        raise AssertionError(f"Scenario 1 restoreVolume did not restore to 1.0: {restore_end1!r}")
+    if s1["speechCallsCount"] != 0:
+        raise AssertionError("Scenario 1 should not trigger Web Speech fallback when Piper returns 200")
+    if len(s1["fetchCalls"]) != 1 or s1["fetchCalls"][0]["url"] != "/api/tts" or s1["fetchCalls"][0]["method"] != "POST":
+        raise AssertionError(f"Scenario 1 unexpected fetch calls: {s1['fetchCalls']!r}")
+    if s1["fetchCalls"][0]["body"] != {
+        "text": "Mål för hemmalaget!",
+        "voiceId": "sv_SE-nst-medium",
+        "rate": 1.0,
+    }:
+        raise AssertionError(f"Scenario 1 unexpected POST body: {s1['fetchCalls'][0]['body']!r}")
+    if s1["finalCtrl"]["isPlaying"] is not True or abs(s1["finalCtrl"]["volume"] - 1.0) > 1e-6 or s1["finalCtrl"]["isDucked"] is not False:
+        raise AssertionError(f"Scenario 1 unexpected final AudioController state: {s1['finalCtrl']!r}")
+    if s1["finalTts"]["playbackState"] != "idle" or s1["finalTts"]["usedFallback"] is not False or s1["finalTts"]["lastError"] is not None:
+        raise AssertionError(f"Scenario 1 unexpected final TtsService state: {s1['finalTts']!r}")
+    if "loading" not in s1["states"] or "speaking" not in s1["states"] or s1["states"][-1] != "idle":
+        raise AssertionError(f"Scenario 1 missing expected playbackState transitions: {s1['states']!r}")
+
+    # Assert Scenario 2: HTTP 503 Calm Tech Web Speech fallback + restoreVolume
+    s2 = res["scenario2"]
+    if s2["playWavCount"] != 0:
+        raise AssertionError(f"Scenario 2 playWav should not be called on HTTP 503, got {s2['playWavCount']}")
+    ev2 = s2["events"]
+    kinds2 = [e["kind"] for e in ev2]
+    required_seq2 = [
+        "audioCtrl:duckVolume:start",
+        "audioCtrl:duckVolume:end",
+        "tts:webspeech:start",
+        "tts:webspeech:end",
+        "audioCtrl:restoreVolume:start",
+        "audioCtrl:restoreVolume:end",
+    ]
+    indices2 = [kinds2.index(k) if k in kinds2 else -1 for k in required_seq2]
+    if any(idx < 0 for idx in indices2) or indices2 != sorted(indices2):
+        raise AssertionError(f"Scenario 2 Web Speech fallback sequence invalid: {kinds2!r}")
+    ws_start2 = ev2[indices2[2]]
+    if (
+        ws_start2["lang"] != "sv-SE"
+        or abs(ws_start2["ctrlState"]["volume"] - 0.25) > 1e-6
+        or ws_start2["ctrlState"]["isDucked"] is not True
+        or ws_start2["ttsState"]["usedFallback"] is not True
+        or ws_start2["ttsState"]["activeEngine"] != "webspeech"
+    ):
+        raise AssertionError(f"Scenario 2 Web Speech fallback started in wrong state: {ws_start2!r}")
+    if (
+        s2["finalTts"]["usedFallback"] is not True
+        or s2["finalTts"]["playbackState"] != "idle"
+        or not s2["finalTts"]["lastError"]
+    ):
+        raise AssertionError(f"Scenario 2 final TtsService state invalid: {s2['finalTts']!r}")
+    if (
+        s2["finalCtrl"]["isPlaying"] is not True
+        or abs(s2["finalCtrl"]["volume"] - 1.0) > 1e-6
+        or s2["finalCtrl"]["isDucked"] is not False
+    ):
+        raise AssertionError(f"Scenario 2 did not restore music after Web Speech fallback: {s2['finalCtrl']!r}")
+
+    # Assert Scenario 3: ttsRestoreMusicAfter: false skips restoreVolume
+    s3 = res["scenario3"]
+    kinds3 = [e["kind"] for e in s3["events"]]
+    if "audioCtrl:duckVolume:end" not in kinds3 or "tts:playWav:end" not in kinds3:
+        raise AssertionError(f"Scenario 3 missing duck/play events: {kinds3!r}")
+    if any(k.startswith("audioCtrl:restoreVolume") for k in kinds3):
+        raise AssertionError(f"Scenario 3 must skip restoreVolume when ttsRestoreMusicAfter is false: {kinds3!r}")
+    if abs(s3["finalCtrl"]["volume"] - 0.25) > 1e-6 or s3["finalCtrl"]["isDucked"] is not True:
+        raise AssertionError(f"Scenario 3 expected volume to remain ducked at 0.25: {s3['finalCtrl']!r}")
+    if s3["finalTts"]["playbackState"] != "idle":
+        raise AssertionError(f"Scenario 3 expected idle TtsService state: {s3['finalTts']!r}")
+
+    # Assert Scenario 4: ttsService.stop() cancels mid-speech with no late restoreVolume
+    s4 = res["scenario4"]
+    kinds4 = [e["kind"] for e in s4["events"]]
+    if "audioCtrl:duckVolume:end" not in kinds4 or "tts:playWav:start" not in kinds4:
+        raise AssertionError(f"Scenario 4 missing duck/play events before stop(): {kinds4!r}")
+    if s4["playerStopCalled"] < 1 or s4["signalAbortedObserved"] is not True:
+        raise AssertionError(
+            f"Scenario 4 stop() did not abort active playback cleanly: "
+            f"stopCalled={s4['playerStopCalled']}, aborted={s4['signalAbortedObserved']}"
+        )
+    if any(k.startswith("audioCtrl:restoreVolume") for k in kinds4):
+        raise AssertionError(f"Scenario 4 must NOT call restoreVolume after stop(): {kinds4!r}")
+    if abs(s4["finalCtrl"]["volume"] - 0.25) > 1e-6 or s4["finalCtrl"]["isDucked"] is not True:
+        raise AssertionError(f"Scenario 4 music volume changed unexpectedly after stop(): {s4['finalCtrl']!r}")
+    if s4["finalTts"]["playbackState"] != "idle":
+        raise AssertionError(f"Scenario 4 TtsService did not return to idle after stop(): {s4['finalTts']!r}")
+
+
+def check_tts_schema_profile_roundtrip_and_static_wiring() -> None:
+    """Oracle 25: Verify tts* schema/profile/JSON round-trip and static Vite/UI TTS wiring."""
+    script = """
+import { DEFAULT_MATCH_PROFILES, DEFAULT_SETTINGS } from './src/data/defaults.ts';
+import { useAppStore } from './src/store/useAppStore.ts';
+
+function pickTts(s) {
+  return {
+    ttsEnabled: s.ttsEnabled,
+    ttsEngine: s.ttsEngine,
+    ttsVoiceId: s.ttsVoiceId,
+    ttsRate: s.ttsRate,
+    ttsVolume: s.ttsVolume,
+    ttsAutoRead: s.ttsAutoRead,
+    ttsRestoreMusicAfter: s.ttsRestoreMusicAfter,
+  };
+}
+
+useAppStore.getState().resetToDefaults();
+const storeDefaults = pickTts(useAppStore.getState().settings);
+
+useAppStore.getState().updateSettings({
+  ttsEnabled: false,
+  ttsEngine: 'webspeech',
+  ttsVoiceId: 'sv_SE-lisa-medium',
+  ttsRate: 1.35,
+  ttsVolume: 0.75,
+  ttsAutoRead: true,
+  ttsRestoreMusicAfter: false,
+});
+const afterCustomUpdate = pickTts(useAppStore.getState().settings);
+
+const customProfileId = useAppStore.getState().saveCurrentAsMatchProfile(
+  'AI-Speaker Lisa Profil',
+  'A-lag',
+  false,
+);
+
+const activatedU12 = useAppStore.getState().activateMatchProfile('profile-u12-standard');
+const afterSwitchU12 = pickTts(useAppStore.getState().settings);
+
+const activatedCustom = useAppStore.getState().activateMatchProfile(customProfileId);
+const afterSwitchCustom = pickTts(useAppStore.getState().settings);
+
+const exportedJson = useAppStore.getState().exportConfigJson();
+const parsedExported = JSON.parse(exportedJson);
+
+useAppStore.getState().resetToDefaults();
+const importedResult = useAppStore.getState().importConfigJson(exportedJson);
+const afterImportStore = pickTts(useAppStore.getState().settings);
+
+const switchU12AfterImport = useAppStore.getState().activateMatchProfile('profile-u12-standard');
+const afterSwitchU12Import = pickTts(useAppStore.getState().settings);
+const switchCustomAfterImport = useAppStore.getState().activateMatchProfile(customProfileId);
+const afterSwitchCustomImport = pickTts(useAppStore.getState().settings);
+
+// Verify store updateSettings sanitizes invalid/out-of-range TTS inputs safely
+useAppStore.getState().updateSettings({
+  ttsEngine: 'invalid-engine',
+  ttsVoiceId: '../etc/passwd',
+  ttsRate: 9.0,
+  ttsVolume: -2.0,
+});
+const afterInvalidClamp = pickTts(useAppStore.getState().settings);
+
+console.log(JSON.stringify({
+  defaultSettingsTts: pickTts(DEFAULT_SETTINGS),
+  defaultProfilesTts: DEFAULT_MATCH_PROFILES.map((p) => ({
+    id: p.id,
+    ...pickTts(p.settings),
+  })),
+  storeDefaults,
+  afterCustomUpdate,
+  customProfileId,
+  activatedU12,
+  afterSwitchU12,
+  activatedCustom,
+  afterSwitchCustom,
+  exportedSettingsTts: pickTts(parsedExported.settings),
+  exportedCustomProfileTts: pickTts(
+    parsedExported.matchProfiles.find((p) => p.id === customProfileId)?.settings,
+  ),
+  importedResultTts: pickTts(importedResult.settings),
+  afterImportStore,
+  switchU12AfterImport,
+  afterSwitchU12Import,
+  switchCustomAfterImport,
+  afterSwitchCustomImport,
+  afterInvalidClamp,
+}));
+"""
+    res = run_ts_script(script, timeout=30)
+
+    expected_defaults = {
+        "ttsEnabled": True,
+        "ttsEngine": "piper",
+        "ttsVoiceId": "sv_SE-nst-medium",
+        "ttsRate": 1.0,
+        "ttsVolume": 1.0,
+        "ttsAutoRead": False,
+        "ttsRestoreMusicAfter": True,
+    }
+    expected_custom = {
+        "ttsEnabled": False,
+        "ttsEngine": "webspeech",
+        "ttsVoiceId": "sv_SE-lisa-medium",
+        "ttsRate": 1.35,
+        "ttsVolume": 0.75,
+        "ttsAutoRead": True,
+        "ttsRestoreMusicAfter": False,
+    }
+
+    if res["defaultSettingsTts"] != expected_defaults or res["storeDefaults"] != expected_defaults:
+        raise AssertionError(
+            f"Unexpected TTS defaults: default={res['defaultSettingsTts']!r}, store={res['storeDefaults']!r}"
+        )
+    if len(res["defaultProfilesTts"]) < 2:
+        raise AssertionError("Expected >= 2 DEFAULT_MATCH_PROFILES")
+    for prof in res["defaultProfilesTts"]:
+        if {k: prof[k] for k in expected_defaults} != expected_defaults:
+            raise AssertionError(f"Default MatchProfile missing TTS defaults: {prof!r}")
+
+    if res["afterCustomUpdate"] != expected_custom:
+        raise AssertionError(f"updateSettings failed for custom TTS values: {res['afterCustomUpdate']!r}")
+    if not res["activatedU12"] or res["afterSwitchU12"] != expected_defaults:
+        raise AssertionError(f"Switching to U12 profile did not restore TTS defaults: {res['afterSwitchU12']!r}")
+    if not res["activatedCustom"] or res["afterSwitchCustom"] != expected_custom:
+        raise AssertionError(f"Switching to custom TTS profile failed: {res['afterSwitchCustom']!r}")
+
+    if res["exportedSettingsTts"] != expected_custom or res["exportedCustomProfileTts"] != expected_custom:
+        raise AssertionError(
+            f"exportConfigJson missing custom TTS settings: settings={res['exportedSettingsTts']!r}, "
+            f"profile={res['exportedCustomProfileTts']!r}"
+        )
+    if res["importedResultTts"] != expected_custom or res["afterImportStore"] != expected_custom:
+        raise AssertionError(f"importConfigJson did not preserve TTS settings: {res['afterImportStore']!r}")
+    if not res["switchU12AfterImport"] or res["afterSwitchU12Import"] != expected_defaults:
+        raise AssertionError(f"U12 profile TTS defaults broken after JSON import: {res['afterSwitchU12Import']!r}")
+    if not res["switchCustomAfterImport"] or res["afterSwitchCustomImport"] != expected_custom:
+        raise AssertionError(f"Custom profile TTS settings lost after JSON import: {res['afterSwitchCustomImport']!r}")
+
+    clamped = res["afterInvalidClamp"]
+    if (
+        clamped["ttsEngine"] != "piper"
+        or clamped["ttsVoiceId"] != "sv_SE-nst-medium"
+        or clamped["ttsRate"] != 2.0
+        or clamped["ttsVolume"] != 0.0
+    ):
+        raise AssertionError(f"Store updateSettings did not sanitize invalid TTS inputs: {clamped!r}")
+
+    # Static verification of vite.config.ts TTS middleware and endpoints
+    vite_src = (PROJECT_ROOT / "vite.config.ts").read_text(encoding="utf-8")
+    for token in (
+        "/api/tts/status",
+        "/api/tts",
+        "createPiperTtsMiddleware",
+        "piperTtsPlugin",
+        "piperTtsPlugin()",
+        "isValidPiperVoiceId",
+        "calculatePiperLengthScale",
+        "audio/wav",
+        "503",
+    ):
+        if token not in vite_src:
+            raise AssertionError(f"vite.config.ts missing required Piper TTS token: {token!r}")
+
+    # Static verification of AI-Speaker UI components
+    setup_src = (PROJECT_ROOT / "src" / "components" / "SetupView.tsx").read_text(encoding="utf-8")
+    for token in (
+        "TtsSettingsSection",
+        "ttsService",
+        "sv_SE-nst-medium",
+        "sv_SE-lisa-medium",
+        "ttsEnabled",
+        "ttsEngine",
+        "ttsVoiceId",
+        "ttsRate",
+        "ttsVolume",
+        "ttsAutoRead",
+        "ttsRestoreMusicAfter",
+        "Provlyssna AI-Speaker",
+    ):
+        if token not in setup_src:
+            raise AssertionError(f"SetupView.tsx missing required AI-Speaker UI token: {token!r}")
+
+    for modal_name in ("PenaltyFlowModal.tsx", "GoalFlowModal.tsx"):
+        modal_src = (PROJECT_ROOT / "src" / "components" / modal_name).read_text(encoding="utf-8")
+        for token in (
+            "ttsService",
+            "ttsService.speak(",
+            "ttsService.stop()",
+            "LÄS UPP MANUS (AI-SPEAKER)",
+            "STOPPA UPPLÄSNING",
+        ):
+            if token not in modal_src:
+                raise AssertionError(f"{modal_name} missing required AI-Speaker token: {token!r}")
+
+
 def main() -> int:
     checks = [
         ("1. Production build & dist/ artifacts", check_production_build),
@@ -4089,6 +4826,9 @@ def main() -> int:
         ("20. Store importEmbeddedMediaArchive auto-pads in 'media_archive', idempotency & deletion respect", check_store_embedded_media_archive_idempotency),
         ("21. DEFAULT_TEAMS.home roster (#12, #6, #22, #00), upsertPlayer normalization & teleprompter full-name output", check_roster_lookup_and_teleprompter),
         ("22. AudioController.playAt() transition fade out/in & direct cut across Spotify/Local", check_audio_controller_track_transition_fade),
+        ("23. Offline Piper CLI synthesis for sv_SE-nst-medium & sv_SE-lisa-medium (RIFF/WAVE > 10KB)", check_piper_cli_offline_synthesis),
+        ("24. TtsService + AudioController smart interaction (duck/restore, 503 fallback, no-restore, stop)", check_tts_service_audio_controller_smart_interaction),
+        ("25. TTS schema/profile/JSON round-trip & static Vite/UI AI-Speaker wiring", check_tts_schema_profile_roundtrip_and_static_wiring),
     ]
 
     for label, fn in checks:

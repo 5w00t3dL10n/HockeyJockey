@@ -74,12 +74,35 @@ export interface PenaltyDefinition {
   iconKey: string; // Referens till SVG-komponent
 }
 
+export type TtsEngineType = 'piper' | 'webspeech';
+
+export type PiperVoiceId = 'sv_SE-nst-medium' | 'sv_SE-lisa-medium';
+
+export interface TtsVoiceStatus {
+  id: PiperVoiceId;
+  label: string;
+  available: boolean;
+}
+
+export interface TtsStatusResponse {
+  available: boolean;
+  engine: 'piper';
+  voices: TtsVoiceStatus[];
+}
+
 export interface AppSettings {
   duckVolume: number; // T.ex. 0.2
   fadeOutDurationMs: number; // T.ex. 600
   crossfadeEnabled: boolean; // Mjuk Fade Out / Fade In vid byte från pågående låt
   crossfadeDurationMs: number; // Tid per riktning i ms (default 350)
   awayGoalSilence: boolean;
+  ttsEnabled: boolean;
+  ttsEngine: TtsEngineType;
+  ttsVoiceId: PiperVoiceId;
+  ttsRate: number; // 0.5–2.0 (default 1.0)
+  ttsVolume: number; // 0.0–1.0 (default 1.0)
+  ttsAutoRead: boolean;
+  ttsRestoreMusicAfter: boolean;
   spotifyClientId: string;
   spotifyRedirectUri: string;
   keyBindings: KeyBindings;
@@ -119,6 +142,13 @@ export interface MatchProfile {
       | 'crossfadeEnabled'
       | 'crossfadeDurationMs'
       | 'awayGoalSilence'
+      | 'ttsEnabled'
+      | 'ttsEngine'
+      | 'ttsVoiceId'
+      | 'ttsRate'
+      | 'ttsVolume'
+      | 'ttsAutoRead'
+      | 'ttsRestoreMusicAfter'
       | 'scriptTemplates'
       | 'keyBindings'
       | 'soundboardGroups'

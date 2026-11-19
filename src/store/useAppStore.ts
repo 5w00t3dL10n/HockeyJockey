@@ -31,6 +31,8 @@ import {
   exportMatchConfig,
   importMatchConfig,
   isLocalAudioUri,
+  isValidPiperVoiceId,
+  isValidTtsEngine,
   normalizeJerseyNumber,
   parseRosterText,
   sanitizeKeyBindings,
@@ -718,11 +720,57 @@ export const useAppStore = create<AppStoreState>()(
                     : 0
                 : state.settings.crossfadeDurationMs
               : state.settings.crossfadeDurationMs;
+          const nextTtsEnabled =
+            typeof updates.ttsEnabled === 'boolean'
+              ? updates.ttsEnabled
+              : state.settings.ttsEnabled;
+          const nextTtsEngine =
+            updates.ttsEngine !== undefined
+              ? isValidTtsEngine(updates.ttsEngine)
+                ? updates.ttsEngine
+                : 'piper'
+              : state.settings.ttsEngine;
+          const nextTtsVoiceId =
+            updates.ttsVoiceId !== undefined
+              ? typeof updates.ttsVoiceId === 'string' &&
+                isValidPiperVoiceId(updates.ttsVoiceId)
+                ? updates.ttsVoiceId
+                : 'sv_SE-nst-medium'
+              : state.settings.ttsVoiceId;
+          const nextTtsRate =
+            updates.ttsRate !== undefined
+              ? typeof updates.ttsRate === 'number' &&
+                Number.isFinite(updates.ttsRate)
+                ? Math.min(2.0, Math.max(0.5, updates.ttsRate))
+                : state.settings.ttsRate
+              : state.settings.ttsRate;
+          const nextTtsVolume =
+            updates.ttsVolume !== undefined
+              ? typeof updates.ttsVolume === 'number' &&
+                Number.isFinite(updates.ttsVolume)
+                ? Math.min(1.0, Math.max(0.0, updates.ttsVolume))
+                : state.settings.ttsVolume
+              : state.settings.ttsVolume;
+          const nextTtsAutoRead =
+            typeof updates.ttsAutoRead === 'boolean'
+              ? updates.ttsAutoRead
+              : state.settings.ttsAutoRead;
+          const nextTtsRestoreMusicAfter =
+            typeof updates.ttsRestoreMusicAfter === 'boolean'
+              ? updates.ttsRestoreMusicAfter
+              : state.settings.ttsRestoreMusicAfter;
           const nextSettings: AppSettings = {
             ...state.settings,
             ...updates,
             crossfadeEnabled: nextCrossfadeEnabled,
             crossfadeDurationMs: nextCrossfadeDurationMs,
+            ttsEnabled: nextTtsEnabled,
+            ttsEngine: nextTtsEngine,
+            ttsVoiceId: nextTtsVoiceId,
+            ttsRate: nextTtsRate,
+            ttsVolume: nextTtsVolume,
+            ttsAutoRead: nextTtsAutoRead,
+            ttsRestoreMusicAfter: nextTtsRestoreMusicAfter,
             keyBindings: nextKeyBindings,
             soundboardGroups: nextSoundboardGroups,
           };
@@ -982,6 +1030,13 @@ export const useAppStore = create<AppStoreState>()(
             crossfadeEnabled: state.settings.crossfadeEnabled,
             crossfadeDurationMs: state.settings.crossfadeDurationMs,
             awayGoalSilence: state.settings.awayGoalSilence,
+            ttsEnabled: state.settings.ttsEnabled,
+            ttsEngine: state.settings.ttsEngine,
+            ttsVoiceId: state.settings.ttsVoiceId,
+            ttsRate: state.settings.ttsRate,
+            ttsVolume: state.settings.ttsVolume,
+            ttsAutoRead: state.settings.ttsAutoRead,
+            ttsRestoreMusicAfter: state.settings.ttsRestoreMusicAfter,
             scriptTemplates: { ...state.settings.scriptTemplates },
             keyBindings: clonedBindings,
             soundboardGroups: clonedGroups,
@@ -1054,6 +1109,41 @@ export const useAppStore = create<AppStoreState>()(
             typeof profile.settings?.awayGoalSilence === 'boolean'
               ? profile.settings.awayGoalSilence
               : state.settings.awayGoalSilence,
+          ttsEnabled:
+            typeof profile.settings?.ttsEnabled === 'boolean'
+              ? profile.settings.ttsEnabled
+              : state.settings.ttsEnabled,
+          ttsEngine:
+            profile.settings?.ttsEngine !== undefined
+              ? isValidTtsEngine(profile.settings.ttsEngine)
+                ? profile.settings.ttsEngine
+                : 'piper'
+              : state.settings.ttsEngine,
+          ttsVoiceId:
+            profile.settings?.ttsVoiceId !== undefined
+              ? typeof profile.settings.ttsVoiceId === 'string' &&
+                isValidPiperVoiceId(profile.settings.ttsVoiceId)
+                ? profile.settings.ttsVoiceId
+                : 'sv_SE-nst-medium'
+              : state.settings.ttsVoiceId,
+          ttsRate:
+            typeof profile.settings?.ttsRate === 'number' &&
+            Number.isFinite(profile.settings.ttsRate)
+              ? Math.min(2.0, Math.max(0.5, profile.settings.ttsRate))
+              : state.settings.ttsRate,
+          ttsVolume:
+            typeof profile.settings?.ttsVolume === 'number' &&
+            Number.isFinite(profile.settings.ttsVolume)
+              ? Math.min(1.0, Math.max(0.0, profile.settings.ttsVolume))
+              : state.settings.ttsVolume,
+          ttsAutoRead:
+            typeof profile.settings?.ttsAutoRead === 'boolean'
+              ? profile.settings.ttsAutoRead
+              : state.settings.ttsAutoRead,
+          ttsRestoreMusicAfter:
+            typeof profile.settings?.ttsRestoreMusicAfter === 'boolean'
+              ? profile.settings.ttsRestoreMusicAfter
+              : state.settings.ttsRestoreMusicAfter,
           scriptTemplates: profile.settings?.scriptTemplates
             ? { ...profile.settings.scriptTemplates }
             : { ...state.settings.scriptTemplates },

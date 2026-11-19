@@ -16,10 +16,12 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Square,
   Trash2,
   Upload,
   UserPlus,
   Users,
+  Volume2,
 } from 'lucide-react';
 import {
   EVENT_PAD_CATEGORIES,
@@ -35,12 +37,17 @@ import {
   type EmbeddedMediaItem,
 } from '../services/localAudioStorage.ts';
 import { fetchSpotifyTrackMetadata } from '../services/spotifyMetadata.ts';
+import {
+  ttsService,
+  type TtsServiceState,
+} from '../services/ttsService.ts';
 import { useAppStore } from '../store/useAppStore.ts';
 import type {
   AppSettings,
   BuiltinPadCategory,
   MatchActionId,
   PadCategory,
+  PiperVoiceId,
   SavedRoster,
   SoundboardGroup,
   SoundPad,
@@ -2719,6 +2726,399 @@ function KeyBindingsSection() {
   );
 }
 
+const PIPER_VOICE_OPTIONS: ReadonlyArray<{
+  id: PiperVoiceId;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: 'sv_SE-nst-medium',
+    label: 'NST – Svensk Speakerröst (Man/Neutral)',
+    description: 'Tydlig neutral arenaröst baserad på Nordisk Språkteknologi.',
+  },
+  {
+    id: 'sv_SE-lisa-medium',
+    label: 'Lisa – Svensk Speakerröst (Kvinna)',
+    description: 'Klar och varm svensk speakerröst för bås och teleprompter.',
+  },
+];
+
+function TtsSettingsSection() {
+  const settings = useAppStore((s) => s.settings);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+
+  const [ttsState, setTtsState] = useState<TtsServiceState>(() =>
+    ttsService.getState(),
+  );
+  const [isCheckingStatus, setIsCheckingStatus] = useState(false);
+
+  useEffect(() => {
+    const unsubscribe = ttsService.subscribe(setTtsState);
+    setIsCheckingStatus(true);
+    void ttsService.checkStatus().finally(() => {
+      setIsCheckingStatus(false);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  const handleRefreshStatus = async () => {
+    setIsCheckingStatus(true);
+    try {
+      await ttsService.checkStatus();
+    } finally {
+      setIsCheckingStatus(false);
+    }
+  };
+
+  const isSpeaking =
+    ttsState.playbackState === 'loading' ||
+    ttsState.playbackState === 'speaking';
+  const piperAvailable = ttsState.piperStatus?.available === true;
+
+  const sampleText =
+    'Mål för Sundsvall Hockey! Målskytt nummer 22, Rasmus Karlsson. Framspelad av nummer 14 Erik Svensson.';
+
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 space-y-5 lg:col-span-2">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <Volume2 className="h-5 w-5 text-cyan-400" />
+          <div>
+            <h3 className="text-lg font-black text-white">
+              AI-Speaker &amp; Talsyntes för Teleprompter (Piper Offline TTS)
+            </h3>
+            <p className="text-xs text-slate-400">
+              Lokal svensk talsyntes med automatiskt Smart Samspel som sänker
+              arenamusiken innan utrop och höjer den igen efteråt.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-bold ${
+              piperAvailable
+                ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
+                : 'border-amber-500/40 bg-amber-950/50 text-amber-300'
+            }`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${
+                piperAvailable ? 'bg-emerald-400' : 'bg-amber-400'
+              }`}
+            />
+            {piperAvailable
+              ? 'Tillgänglig offline'
+              : 'Ej installerad – Web Speech fallback'}
+          </span>
+
+          <button
+            type="button"
+            disabled={isCheckingStatus}
+            onClick={() => void handleRefreshStatus()}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-bold text-slate-200 hover:bg-slate-700 disabled:opacity-50 cursor-pointer"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${isCheckingStatus ? 'animate-spin' : ''}`}
+            />
+            Uppdatera status
+          </button>
+        </div>
+      </div>
+
+      {/* Master TTS Toggle */}
+      <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3.5 flex flex-wrap items-center justify-between gap-3">
+        <div className="space-y-0.5">
+          <div className="text-sm font-bold text-white">
+            Aktivera talsyntes-knapp i talmanus
+          </div>
+          <p className="text-xs text-slate-400">
+            Visar knappen för AI-Speaker i mål- och utvisningsflödets talmanus.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={settings.ttsEnabled}
+          aria-label="Aktivera talsyntes-knapp i talmanus"
+          onClick={() => updateSettings({ ttsEnabled: !settings.ttsEnabled })}
+          className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+            settings.ttsEnabled
+              ? 'border-emerald-400/50 bg-emerald-600'
+              : 'border-slate-600 bg-slate-700'
+          }`}
+        >
+          <span
+            className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+              settings.ttsEnabled ? 'translate-x-6' : 'translate-x-1'
+            }`}
+          />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        {/* Engine & Voice Selection */}
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <div className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              Motorval
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                onClick={() => updateSettings({ ttsEngine: 'piper' })}
+                className={`rounded-xl border px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
+                  settings.ttsEngine === 'piper'
+                    ? 'border-cyan-400/70 bg-cyan-950/60 text-cyan-100'
+                    : 'border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-800/80'
+                }`}
+              >
+                <div className="text-xs font-extrabold">
+                  Piper TTS – Offline Svensk AI-röst
+                </div>
+                <div className="mt-0.5 text-[11px] text-slate-400">
+                  Körs lokalt på datorn med automatisk Web Speech-fallback.
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => updateSettings({ ttsEngine: 'webspeech' })}
+                className={`rounded-xl border px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
+                  settings.ttsEngine === 'webspeech'
+                    ? 'border-cyan-400/70 bg-cyan-950/60 text-cyan-100'
+                    : 'border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-800/80'
+                }`}
+              >
+                <div className="text-xs font-extrabold">
+                  Webbläsarens Web Speech
+                </div>
+                <div className="mt-0.5 text-[11px] text-slate-400">
+                  Inbyggd svensk systemröst (sv-SE) i webbläsaren.
+                </div>
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              Röstval (Piper Offline)
+            </div>
+            <div className="space-y-2">
+              {PIPER_VOICE_OPTIONS.map((voice) => {
+                const statusEntry = ttsState.piperStatus?.voices.find(
+                  (v) => v.id === voice.id,
+                );
+                const isSelected = settings.ttsVoiceId === voice.id;
+                const voiceAvailable = statusEntry?.available === true;
+
+                return (
+                  <button
+                    key={voice.id}
+                    type="button"
+                    onClick={() => updateSettings({ ttsVoiceId: voice.id })}
+                    className={`w-full rounded-xl border px-3.5 py-2.5 text-left transition-colors cursor-pointer flex items-center justify-between gap-3 ${
+                      isSelected
+                        ? 'border-blue-400/70 bg-blue-950/50 text-white'
+                        : 'border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-800/80'
+                    }`}
+                  >
+                    <div>
+                      <div className="text-xs font-extrabold">{voice.label}</div>
+                      <div className="mt-0.5 text-[11px] text-slate-400">
+                        {voice.description}
+                      </div>
+                    </div>
+                    <span
+                      className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                        voiceAvailable
+                          ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-300'
+                          : 'border-slate-700 bg-slate-900 text-slate-400'
+                      }`}
+                    >
+                      {statusEntry
+                        ? voiceAvailable
+                          ? 'Tillgänglig'
+                          : 'Saknas'
+                        : 'Okänd'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Sliders, Automation Switches & Preview */}
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 rounded-xl border border-slate-800 bg-slate-950/80 p-3.5">
+            <div>
+              <label
+                htmlFor="tts-rate-range"
+                className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1"
+              >
+                Talhastighet ({settings.ttsRate.toFixed(2)}x)
+              </label>
+              <input
+                id="tts-rate-range"
+                type="range"
+                min={0.5}
+                max={2.0}
+                step={0.05}
+                value={settings.ttsRate}
+                onChange={(e) =>
+                  updateSettings({ ttsRate: Number(e.target.value) })
+                }
+                className="w-full accent-cyan-400 cursor-pointer"
+              />
+              <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
+                <span>0.5x</span>
+                <span>1.0x</span>
+                <span>2.0x</span>
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="tts-volume-range"
+                className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1"
+              >
+                Röstvolym ({Math.round(settings.ttsVolume * 100)}%)
+              </label>
+              <input
+                id="tts-volume-range"
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={Math.round(settings.ttsVolume * 100)}
+                onChange={(e) =>
+                  updateSettings({ ttsVolume: Number(e.target.value) / 100 })
+                }
+                className="w-full accent-cyan-400 cursor-pointer"
+              />
+              <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
+                <span>0%</span>
+                <span>50%</span>
+                <span>100%</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2.5">
+            <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-white">
+                  Läs upp talmanus automatiskt när mål/utvisning visas
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Startar AI-speakern direkt när manussteget öppnas.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.ttsAutoRead}
+                aria-label="Läs upp talmanus automatiskt när mål/utvisning visas"
+                onClick={() =>
+                  updateSettings({ ttsAutoRead: !settings.ttsAutoRead })
+                }
+                className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                  settings.ttsAutoRead
+                    ? 'border-emerald-400/50 bg-emerald-600'
+                    : 'border-slate-600 bg-slate-700'
+                }`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                    settings.ttsAutoRead ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-white">
+                  Höj musiken automatiskt när AI-speakern pratat klart
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Duckar arenamusiken före uppläsning och återställer till 100%
+                  när talet är slut.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.ttsRestoreMusicAfter}
+                aria-label="Höj musiken automatiskt när AI-speakern pratat klart"
+                onClick={() =>
+                  updateSettings({
+                    ttsRestoreMusicAfter: !settings.ttsRestoreMusicAfter,
+                  })
+                }
+                className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                  settings.ttsRestoreMusicAfter
+                    ? 'border-emerald-400/50 bg-emerald-600'
+                    : 'border-slate-600 bg-slate-700'
+                }`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                    settings.ttsRestoreMusicAfter
+                      ? 'translate-x-6'
+                      : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            <button
+              type="button"
+              onClick={() => {
+                if (isSpeaking) {
+                  ttsService.stop();
+                } else {
+                  void ttsService.speak(sampleText, settings);
+                }
+              }}
+              className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-black transition-colors cursor-pointer ${
+                isSpeaking
+                  ? 'border-red-400/60 bg-red-600 text-white hover:bg-red-500'
+                  : 'border-cyan-400/50 bg-cyan-600 text-white hover:bg-cyan-500'
+              }`}
+            >
+              {ttsState.playbackState === 'loading' ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : isSpeaking ? (
+                <Square className="h-4 w-4 fill-current" />
+              ) : (
+                <Volume2 className="h-4 w-4" />
+              )}
+              <span>
+                {isSpeaking
+                  ? '⏹ Stoppa provlyssning'
+                  : '🔊 Provlyssna AI-Speaker'}
+              </span>
+            </button>
+
+            {(ttsState.usedFallback || ttsState.lastError) && (
+              <span className="inline-flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-amber-950/40 px-3 py-1.5 text-xs font-medium text-amber-200">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+                <span>{ttsState.lastError || 'Web Speech fallback aktiv'}</span>
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SetupView({ onPreviewTrack, onStopAudio }: SetupViewProps) {
   const [activeTab, setActiveTab] = useState<SetupTab>('roster');
 
@@ -2980,6 +3380,9 @@ export function SetupView({ onPreviewTrack, onStopAudio }: SetupViewProps) {
       {/* TAB 4: SPOTIFY, HOTKEYS, SETTINGS & BACKUP */}
       {activeTab === 'settings' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Piper Offline AI-Speaker & TTS Settings */}
+          <TtsSettingsSection />
+
           {/* Key Bindings Editor */}
           <KeyBindingsSection />
 

@@ -1,14 +1,23 @@
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, type Connect, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import type {
+  PiperVoiceId,
+  TtsStatusResponse,
+  TtsVoiceStatus,
+} from './src/types/models.ts';
 import {
   buildEmbeddedMediaUri,
+  calculatePiperLengthScale,
   inferAudioMimeType,
   isAcceptedAudioFileName,
+  isValidPiperVoiceId,
   parseLocalAudioFilename,
   parseSpotifyMetadataPayload,
 } from './src/utils/domain.ts';
@@ -506,12 +515,482 @@ function embeddedMediaArchivePlugin(): Plugin {
   };
 }
 
+const PIPER_MAX_TEXT_LENGTH = 1500;
+const PIPER_LRU_MAX_ENTRIES = 30;
+const PIPER_SPAWN_TIMEOUT_MS = 20000;
+const PIPER_POST_BODY_LIMIT_BYTES = 64 * 1024;
+
+interface PiperVoiceCatalogEntry {
+  id: PiperVoiceId;
+  label: string;
+  onnxFilename: string;
+  configFilename: string;
+}
+
+const PIPER_VOICE_CATALOG: ReadonlyArray<PiperVoiceCatalogEntry> = [
+  {
+    id: 'sv_SE-nst-medium',
+    label: 'NST – Svensk Speakerröst (Man/Neutral)',
+    onnxFilename: 'sv_SE-nst-medium.onnx',
+    configFilename: 'sv_SE-nst-medium.onnx.json',
+  },
+  {
+    id: 'sv_SE-lisa-medium',
+    label: 'Lisa – Svensk Speakerröst (Kvinna)',
+    onnxFilename: 'sv_SE-lisa-medium.onnx',
+    configFilename: 'sv_SE-lisa-medium.onnx.json',
+  },
+];
+
+const PIPER_VOICE_MAP = new Map<PiperVoiceId, PiperVoiceCatalogEntry>(
+  PIPER_VOICE_CATALOG.map((entry) => [entry.id, entry]),
+);
+
+function getPiperRootDir(): string {
+  const override = process.env.PIPER_HOME?.trim();
+  return override || path.join(os.homedir(), '.local', 'share', 'piper');
+}
+
+async function checkFileExists(
+  filePath: string,
+  requireExecutable = false,
+): Promise<boolean> {
+  try {
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) {
+      return false;
+    }
+    if (requireExecutable) {
+      await fs.promises.access(filePath, fs.constants.X_OK);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function inspectPiperEnvironment(piperRoot: string): Promise<{
+  status: TtsStatusResponse;
+  binPath: string;
+  libDir: string;
+  voicesDir: string;
+  binaryExists: boolean;
+}> {
+  const binPath = path.join(piperRoot, 'piper', 'piper');
+  const libDir = path.join(piperRoot, 'piper');
+  const voicesDir = path.join(piperRoot, 'voices');
+
+  const binaryExists = await checkFileExists(binPath, true);
+  const voices: TtsVoiceStatus[] = await Promise.all(
+    PIPER_VOICE_CATALOG.map(async (entry) => {
+      const onnxPath = path.join(voicesDir, entry.onnxFilename);
+      const configPath = path.join(voicesDir, entry.configFilename);
+      const available =
+        (await checkFileExists(onnxPath)) && (await checkFileExists(configPath));
+      return {
+        id: entry.id,
+        label: entry.label,
+        available,
+      };
+    }),
+  );
+
+  return {
+    status: {
+      available: binaryExists && voices.some((voice) => voice.available),
+      engine: 'piper',
+      voices,
+    },
+    binPath,
+    libDir,
+    voicesDir,
+    binaryExists,
+  };
+}
+
+function readJsonBody(
+  req: IncomingMessage,
+  maxBytes = PIPER_POST_BODY_LIMIT_BYTES,
+): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; status: number; error: string }> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let settled = false;
+
+    const finish = (
+      result:
+        | { ok: true; data: Record<string, unknown> }
+        | { ok: false; status: number; error: string },
+    ) => {
+      if (!settled) {
+        settled = true;
+        resolve(result);
+      }
+    };
+
+    req.on('data', (chunk: Buffer | string) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buf.length;
+      if (totalBytes > maxBytes) {
+        finish({
+          ok: false,
+          status: 413,
+          error: 'Förfrågan är för stor.',
+        });
+        req.destroy();
+        return;
+      }
+      chunks.push(buf);
+    });
+
+    req.on('end', () => {
+      if (settled) {
+        return;
+      }
+      const rawText = Buffer.concat(chunks).toString('utf8').trim();
+      if (!rawText) {
+        finish({
+          ok: false,
+          status: 400,
+          error: 'Text får inte vara tom.',
+        });
+        return;
+      }
+      try {
+        const parsed: unknown = JSON.parse(rawText);
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          finish({
+            ok: false,
+            status: 400,
+            error: 'Ogiltig JSON-kropp.',
+          });
+          return;
+        }
+        finish({ ok: true, data: parsed as Record<string, unknown> });
+      } catch {
+        finish({
+          ok: false,
+          status: 400,
+          error: 'Ogiltig JSON-syntax.',
+        });
+      }
+    });
+
+    req.on('error', () => {
+      finish({
+        ok: false,
+        status: 400,
+        error: 'Kunde inte läsa förfrågningsdata.',
+      });
+    });
+  });
+}
+
+function synthesizeWithPiper(params: {
+  binPath: string;
+  libDir: string;
+  onnxPath: string;
+  configPath: string;
+  lengthScale: number;
+  text: string;
+}): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const prevLd = process.env.LD_LIBRARY_PATH ?? '';
+    const ldLibraryPath = prevLd
+      ? `${params.libDir}:${prevLd}`
+      : params.libDir;
+
+    const args = [
+      '--model',
+      params.onnxPath,
+      '--config',
+      params.configPath,
+      '--length_scale',
+      String(params.lengthScale),
+      '--output_file',
+      '-',
+      '-q',
+    ];
+
+    const child = spawn(params.binPath, args, {
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        LD_LIBRARY_PATH: ldLibraryPath,
+      },
+    });
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let settled = false;
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, PIPER_SPAWN_TIMEOUT_MS);
+
+    const finalize = (err: Error | null, wav?: Buffer) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (err) {
+        reject(err);
+      } else if (wav) {
+        resolve(wav);
+      }
+    };
+
+    child.stdout.on('data', (chunk: Buffer | string) => {
+      stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+
+    child.stdin.on('error', () => {
+      // Ignore EPIPE if Piper terminates before reading full stdin
+    });
+
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      finalize(err);
+    });
+
+    child.on('close', (code) => {
+      if (timedOut) {
+        finalize(new Error('Piper TTS överskred tidsgränsen.'));
+        return;
+      }
+      const wavBuffer = Buffer.concat(stdoutChunks);
+      if (code !== 0 || wavBuffer.length === 0) {
+        const stderrText = Buffer.concat(stderrChunks).toString('utf8').trim();
+        finalize(
+          new Error(
+            stderrText || `Piper TTS avslutades med kod ${String(code)}.`,
+          ),
+        );
+        return;
+      }
+      finalize(null, wavBuffer);
+    });
+
+    child.stdin.end(`${params.text}\n`);
+  });
+}
+
+export function createPiperTtsMiddleware(): Connect.NextHandleFunction {
+  const wavLruCache = new Map<string, Buffer>();
+
+  const getCachedWav = (key: string): Buffer | undefined => {
+    const hit = wavLruCache.get(key);
+    if (!hit) {
+      return undefined;
+    }
+    wavLruCache.delete(key);
+    wavLruCache.set(key, hit);
+    return hit;
+  };
+
+  const setCachedWav = (key: string, wav: Buffer): void => {
+    if (wavLruCache.has(key)) {
+      wavLruCache.delete(key);
+    } else if (wavLruCache.size >= PIPER_LRU_MAX_ENTRIES) {
+      const oldestKey = wavLruCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        wavLruCache.delete(oldestKey);
+      }
+    }
+    wavLruCache.set(key, wav);
+  };
+
+  return (
+    req: IncomingMessage,
+    res: ServerResponse,
+    next: Connect.NextFunction,
+  ) => {
+    const rawUrl = req.url ?? '/';
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(rawUrl, 'http://127.0.0.1');
+    } catch {
+      next();
+      return;
+    }
+
+    if (parsedUrl.pathname === '/api/tts/status') {
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'Method not allowed' });
+        return;
+      }
+
+      void (async () => {
+        try {
+          const env = await inspectPiperEnvironment(getPiperRootDir());
+          sendJson(res, 200, env.status);
+        } catch {
+          sendJson(res, 500, { error: 'Kunde inte kontrollera Piper-status.' });
+        }
+      })();
+      return;
+    }
+
+    if (parsedUrl.pathname === '/api/tts') {
+      if (req.method !== 'GET' && req.method !== 'POST') {
+        sendJson(res, 405, { error: 'Method not allowed' });
+        return;
+      }
+
+      void (async () => {
+        let rawText: unknown;
+        let rawVoiceId: unknown;
+        let rawRate: unknown;
+
+        if (req.method === 'GET') {
+          rawText = parsedUrl.searchParams.get('text') ?? '';
+          rawVoiceId = parsedUrl.searchParams.get('voiceId');
+          rawRate = parsedUrl.searchParams.get('rate');
+        } else {
+          const bodyRes = await readJsonBody(req);
+          if (!bodyRes.ok) {
+            sendJson(res, bodyRes.status, { error: bodyRes.error });
+            return;
+          }
+          rawText = bodyRes.data.text;
+          rawVoiceId = bodyRes.data.voiceId;
+          rawRate = bodyRes.data.rate;
+        }
+
+        const trimmedText =
+          typeof rawText === 'string' ? rawText.trim() : '';
+        if (!trimmedText) {
+          sendJson(res, 400, { error: 'Text får inte vara tom.' });
+          return;
+        }
+        if (trimmedText.length > PIPER_MAX_TEXT_LENGTH) {
+          sendJson(res, 400, {
+            error: `Texten är för lång (max ${PIPER_MAX_TEXT_LENGTH} tecken).`,
+          });
+          return;
+        }
+
+        let voiceId: PiperVoiceId = 'sv_SE-nst-medium';
+        if (rawVoiceId !== undefined && rawVoiceId !== null) {
+          if (
+            typeof rawVoiceId !== 'string' ||
+            !isValidPiperVoiceId(rawVoiceId.trim())
+          ) {
+            sendJson(res, 400, { error: 'Ogiltig röstmodell.' });
+            return;
+          }
+          voiceId = rawVoiceId.trim() as PiperVoiceId;
+        }
+
+        const parsedRate =
+          typeof rawRate === 'number'
+            ? rawRate
+            : typeof rawRate === 'string' && rawRate.trim() !== ''
+              ? Number(rawRate)
+              : 1.0;
+        const lengthScale = calculatePiperLengthScale(parsedRate);
+
+        const piperRoot = getPiperRootDir();
+        const voiceEntry = PIPER_VOICE_MAP.get(voiceId);
+        if (!voiceEntry) {
+          sendJson(res, 400, { error: 'Ogiltig röstmodell.' });
+          return;
+        }
+
+        const binPath = path.join(piperRoot, 'piper', 'piper');
+        const libDir = path.join(piperRoot, 'piper');
+        const voicesDir = path.join(piperRoot, 'voices');
+        const onnxPath = path.join(voicesDir, voiceEntry.onnxFilename);
+        const configPath = path.join(voicesDir, voiceEntry.configFilename);
+
+        const [binaryExists, onnxExists, configExists] = await Promise.all([
+          checkFileExists(binPath, true),
+          checkFileExists(onnxPath),
+          checkFileExists(configPath),
+        ]);
+
+        if (!binaryExists || !onnxExists || !configExists) {
+          sendJson(res, 503, {
+            error: 'Piper TTS är inte tillgänglig på servern.',
+          });
+          return;
+        }
+
+        const cacheKey = `${piperRoot}|${voiceId}|${lengthScale}|${trimmedText}`;
+        let wavBuffer = getCachedWav(cacheKey);
+
+        if (!wavBuffer) {
+          try {
+            wavBuffer = await synthesizeWithPiper({
+              binPath,
+              libDir,
+              onnxPath,
+              configPath,
+              lengthScale,
+              text: trimmedText,
+            });
+            setCachedWav(cacheKey, wavBuffer);
+          } catch (err) {
+            const code =
+              typeof err === 'object' && err !== null && 'code' in err
+                ? String((err as NodeJS.ErrnoException).code)
+                : '';
+            if (code === 'ENOENT' || code === 'EACCES') {
+              sendJson(res, 503, {
+                error: 'Piper TTS är inte tillgänglig på servern.',
+              });
+            } else {
+              sendJson(res, 500, {
+                error: 'Kunde inte syntetisera tal med Piper TTS.',
+              });
+            }
+            return;
+          }
+        }
+
+        if (res.writableEnded) {
+          return;
+        }
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'audio/wav');
+        res.setHeader('Content-Length', String(wavBuffer.length));
+        res.setHeader('Cache-Control', 'no-store');
+        res.end(wavBuffer);
+      })();
+      return;
+    }
+
+    next();
+  };
+}
+
+export function piperTtsPlugin(): Plugin {
+  const middleware = createPiperTtsMiddleware();
+  return {
+    name: 'piper-tts-offline',
+    configureServer(server) {
+      server.middlewares.use(middleware);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(middleware);
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
     spotifyMetadataProxyPlugin(),
     embeddedMediaArchivePlugin(),
+    piperTtsPlugin(),
   ],
   server: {
     host: '127.0.0.1',

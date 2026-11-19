@@ -20,6 +20,7 @@ import {
   startSpotifyLogin,
 } from './services/spotifyAuth.ts';
 import { spotifyPlayerService } from './services/spotifyPlayer.ts';
+import { ttsService } from './services/ttsService.ts';
 import { useAppStore } from './store/useAppStore.ts';
 import type {
   AppMode,
@@ -86,6 +87,7 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    void ttsService.checkStatus();
     void syncEmbeddedMediaArchive().then((items) => {
       if (active) {
         useAppStore.getState().importEmbeddedMediaArchive(items);
@@ -243,10 +245,12 @@ export function App() {
   }, [findPadForFlow, playSoundPad]);
 
   const handleFadeOut = useCallback(() => {
+    ttsService.stop();
     void audioController.fadeOutAndPause(settings.fadeOutDurationMs);
   }, [settings.fadeOutDurationMs]);
 
   const handleHardStop = useCallback(() => {
+    ttsService.stop();
     void audioController.hardStop();
   }, []);
 
@@ -441,14 +445,19 @@ export function App() {
           }
           onRestoreAudio={() => void audioController.restoreVolume(1.0, 400)}
           onFadeOutAndClose={() => {
+            ttsService.stop();
             void audioController.fadeOutAndPause(settings.fadeOutDurationMs);
             setActiveModal(null);
           }}
           onKeepMusicAndClose={() => {
+            ttsService.stop();
             void audioController.restoreVolume(1.0, 400);
             setActiveModal(null);
           }}
-          onCancelClose={() => setActiveModal(null)}
+          onCancelClose={() => {
+            ttsService.stop();
+            setActiveModal(null);
+          }}
         />
       )}
 
@@ -471,14 +480,19 @@ export function App() {
           }
           onRestoreAudio={() => void audioController.restoreVolume(1.0, 400)}
           onFadeOutAndClose={() => {
+            ttsService.stop();
             void audioController.fadeOutAndPause(settings.fadeOutDurationMs);
             setActiveModal(null);
           }}
           onKeepMusicAndClose={() => {
+            ttsService.stop();
             void audioController.restoreVolume(1.0, 400);
             setActiveModal(null);
           }}
-          onCancelClose={() => setActiveModal(null)}
+          onCancelClose={() => {
+            ttsService.stop();
+            setActiveModal(null);
+          }}
         />
       )}
     </div>

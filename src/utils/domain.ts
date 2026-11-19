@@ -19,12 +19,14 @@ import type {
   MatchConfigSnapshot,
   MatchProfile,
   PadCategory,
+  PiperVoiceId,
   SavedRoster,
   SoundboardGroup,
   SoundPad,
   Team,
   TrackCue,
   TrackSourceType,
+  TtsEngineType,
 } from '../types/models.ts';
 
 const SPOTIFY_ID_REGEX = /^[A-Za-z0-9]{22}$/;
@@ -47,6 +49,40 @@ const VALID_TRIGGER_FLOWS = new Set([
   'goal_home',
   'goal_away',
 ]);
+
+export const PIPER_VOICE_IDS = [
+  'sv_SE-nst-medium',
+  'sv_SE-lisa-medium',
+] as const;
+
+export function isValidPiperVoiceId(id: string): id is PiperVoiceId {
+  return (
+    typeof id === 'string' &&
+    (PIPER_VOICE_IDS as readonly string[]).includes(id)
+  );
+}
+
+export function isValidTtsEngine(engine: unknown): engine is TtsEngineType {
+  return engine === 'piper' || engine === 'webspeech';
+}
+
+export function calculatePiperLengthScale(rate: number): number {
+  const safeRate =
+    typeof rate === 'number' && Number.isFinite(rate) && rate > 0
+      ? Math.min(2.0, Math.max(0.5, rate))
+      : 1.0;
+  return Number((1 / safeRate).toFixed(3));
+}
+
+function toNumericInput(value: unknown): number {
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    return Number(value);
+  }
+  return Number.NaN;
+}
 
 function clampNumber(value: number, min: number, max: number, fallback: number): number {
   if (typeof value !== 'number' || Number.isNaN(value)) {
@@ -1855,6 +1891,38 @@ function sanitizeSettings(
       DEFAULT_SETTINGS.crossfadeDurationMs,
     ),
   );
+  const fallbackTtsEnabled =
+    typeof fallback.ttsEnabled === 'boolean'
+      ? fallback.ttsEnabled
+      : DEFAULT_SETTINGS.ttsEnabled;
+  const fallbackTtsEngine = isValidTtsEngine(fallback.ttsEngine)
+    ? fallback.ttsEngine
+    : DEFAULT_SETTINGS.ttsEngine;
+  const fallbackTtsVoiceId =
+    typeof fallback.ttsVoiceId === 'string' &&
+    isValidPiperVoiceId(fallback.ttsVoiceId)
+      ? fallback.ttsVoiceId
+      : DEFAULT_SETTINGS.ttsVoiceId;
+  const fallbackTtsRate = clampNumber(
+    toNumericInput(fallback.ttsRate),
+    0.5,
+    2.0,
+    DEFAULT_SETTINGS.ttsRate,
+  );
+  const fallbackTtsVolume = clampNumber(
+    toNumericInput(fallback.ttsVolume),
+    0.0,
+    1.0,
+    DEFAULT_SETTINGS.ttsVolume,
+  );
+  const fallbackTtsAutoRead =
+    typeof fallback.ttsAutoRead === 'boolean'
+      ? fallback.ttsAutoRead
+      : DEFAULT_SETTINGS.ttsAutoRead;
+  const fallbackTtsRestoreMusicAfter =
+    typeof fallback.ttsRestoreMusicAfter === 'boolean'
+      ? fallback.ttsRestoreMusicAfter
+      : DEFAULT_SETTINGS.ttsRestoreMusicAfter;
 
   if (!isPlainObject(rawSettings)) {
     return {
@@ -1862,6 +1930,13 @@ function sanitizeSettings(
       crossfadeEnabled: fallbackCrossfadeEnabled,
       crossfadeDurationMs: fallbackCrossfadeDurationMs,
       awayGoalSilence: fallbackAwayGoalSilence,
+      ttsEnabled: fallbackTtsEnabled,
+      ttsEngine: fallbackTtsEngine,
+      ttsVoiceId: fallbackTtsVoiceId,
+      ttsRate: fallbackTtsRate,
+      ttsVolume: fallbackTtsVolume,
+      ttsAutoRead: fallbackTtsAutoRead,
+      ttsRestoreMusicAfter: fallbackTtsRestoreMusicAfter,
       spotifyClientId: defaultClientId,
       keyBindings: sanitizeKeyBindings(
         undefined,
@@ -1894,6 +1969,21 @@ function sanitizeSettings(
         ? Number(rawSettings.crossfadeDurationMs)
         : Number.NaN;
 
+  const resolvedTtsEngine =
+    rawSettings.ttsEngine === undefined
+      ? fallbackTtsEngine
+      : isValidTtsEngine(rawSettings.ttsEngine)
+        ? rawSettings.ttsEngine
+        : DEFAULT_SETTINGS.ttsEngine;
+
+  const resolvedTtsVoiceId =
+    rawSettings.ttsVoiceId === undefined
+      ? fallbackTtsVoiceId
+      : typeof rawSettings.ttsVoiceId === 'string' &&
+          isValidPiperVoiceId(rawSettings.ttsVoiceId.trim())
+        ? (rawSettings.ttsVoiceId.trim() as PiperVoiceId)
+        : DEFAULT_SETTINGS.ttsVoiceId;
+
   return {
     duckVolume: clampNumber(
       Number(rawSettings.duckVolume),
@@ -1925,6 +2015,32 @@ function sanitizeSettings(
       typeof rawSettings.awayGoalSilence === 'boolean'
         ? rawSettings.awayGoalSilence
         : fallbackAwayGoalSilence,
+    ttsEnabled:
+      typeof rawSettings.ttsEnabled === 'boolean'
+        ? rawSettings.ttsEnabled
+        : fallbackTtsEnabled,
+    ttsEngine: resolvedTtsEngine,
+    ttsVoiceId: resolvedTtsVoiceId,
+    ttsRate: clampNumber(
+      toNumericInput(rawSettings.ttsRate),
+      0.5,
+      2.0,
+      fallbackTtsRate,
+    ),
+    ttsVolume: clampNumber(
+      toNumericInput(rawSettings.ttsVolume),
+      0.0,
+      1.0,
+      fallbackTtsVolume,
+    ),
+    ttsAutoRead:
+      typeof rawSettings.ttsAutoRead === 'boolean'
+        ? rawSettings.ttsAutoRead
+        : fallbackTtsAutoRead,
+    ttsRestoreMusicAfter:
+      typeof rawSettings.ttsRestoreMusicAfter === 'boolean'
+        ? rawSettings.ttsRestoreMusicAfter
+        : fallbackTtsRestoreMusicAfter,
     spotifyClientId: rawClientId || defaultClientId,
     spotifyRedirectUri:
       typeof rawSettings.spotifyRedirectUri === 'string' &&
@@ -2094,6 +2210,50 @@ export function sanitizeMatchProfile(
 
     if (typeof rawSettings.awayGoalSilence === 'boolean') {
       sanitizedSettings.awayGoalSilence = rawSettings.awayGoalSilence;
+    }
+
+    if (typeof rawSettings.ttsEnabled === 'boolean') {
+      sanitizedSettings.ttsEnabled = rawSettings.ttsEnabled;
+    }
+
+    if (rawSettings.ttsEngine !== undefined) {
+      sanitizedSettings.ttsEngine = isValidTtsEngine(rawSettings.ttsEngine)
+        ? rawSettings.ttsEngine
+        : DEFAULT_SETTINGS.ttsEngine;
+    }
+
+    if (rawSettings.ttsVoiceId !== undefined) {
+      sanitizedSettings.ttsVoiceId =
+        typeof rawSettings.ttsVoiceId === 'string' &&
+        isValidPiperVoiceId(rawSettings.ttsVoiceId.trim())
+          ? (rawSettings.ttsVoiceId.trim() as PiperVoiceId)
+          : DEFAULT_SETTINGS.ttsVoiceId;
+    }
+
+    if (rawSettings.ttsRate !== undefined) {
+      sanitizedSettings.ttsRate = clampNumber(
+        toNumericInput(rawSettings.ttsRate),
+        0.5,
+        2.0,
+        DEFAULT_SETTINGS.ttsRate,
+      );
+    }
+
+    if (rawSettings.ttsVolume !== undefined) {
+      sanitizedSettings.ttsVolume = clampNumber(
+        toNumericInput(rawSettings.ttsVolume),
+        0.0,
+        1.0,
+        DEFAULT_SETTINGS.ttsVolume,
+      );
+    }
+
+    if (typeof rawSettings.ttsAutoRead === 'boolean') {
+      sanitizedSettings.ttsAutoRead = rawSettings.ttsAutoRead;
+    }
+
+    if (typeof rawSettings.ttsRestoreMusicAfter === 'boolean') {
+      sanitizedSettings.ttsRestoreMusicAfter = rawSettings.ttsRestoreMusicAfter;
     }
 
     if (isPlainObject(rawSettings.scriptTemplates)) {

@@ -9,6 +9,8 @@ import {
 import {
   ArrowLeft,
   Delete,
+  Loader2,
+  Square,
   Users,
   Volume2,
   X,
@@ -18,6 +20,10 @@ import {
   PENALTY_DEFINITIONS,
   PENALTY_DURATIONS,
 } from '../data/penalties.ts';
+import {
+  ttsService,
+  type TtsServiceState,
+} from '../services/ttsService.ts';
 import type {
   AppSettings,
   PenaltyDefinition,
@@ -83,6 +89,33 @@ export const PenaltyFlowModal = forwardRef<
   const [duration, setDuration] = useState<string>(DEFAULT_PENALTY_DURATION);
   const [selectedPenalty, setSelectedPenalty] =
     useState<PenaltyDefinition | null>(null);
+  const [ttsState, setTtsState] = useState<TtsServiceState>(() =>
+    ttsService.getState(),
+  );
+
+  useEffect(() => ttsService.subscribe(setTtsState), []);
+
+  useEffect(
+    () => () => {
+      ttsService.stop();
+    },
+    [],
+  );
+
+  const handleFadeOutClick = () => {
+    ttsService.stop();
+    onFadeOutAndClose();
+  };
+
+  const handleKeepMusicClick = () => {
+    ttsService.stop();
+    onKeepMusicAndClose();
+  };
+
+  const handleCancelClick = () => {
+    ttsService.stop();
+    onCancelClose();
+  };
 
   const effectiveRoster = useMemo(
     () => ({ ...team.roster, ...localRosterOverrides }),
@@ -172,13 +205,13 @@ export const PenaltyFlowModal = forwardRef<
     onDigit: handleDigit,
     onBackspace: handleBackspace,
     onEnter: handleNextFromPlayer,
-    onEscape: onCancelClose,
+    onEscape: handleCancelClick,
   });
   keyboardHandlersRef.current = {
     onDigit: handleDigit,
     onBackspace: handleBackspace,
     onEnter: handleNextFromPlayer,
-    onEscape: onCancelClose,
+    onEscape: handleCancelClick,
   };
 
   useImperativeHandle(
@@ -203,6 +236,47 @@ export const PenaltyFlowModal = forwardRef<
         roster: effectiveRoster,
       })
     : '';
+
+  const autoReadForStepRef = useRef(false);
+  useEffect(() => {
+    if (step !== 'script') {
+      autoReadForStepRef.current = false;
+      return;
+    }
+    if (!autoReadForStepRef.current) {
+      autoReadForStepRef.current = true;
+      if (settings.ttsEnabled && settings.ttsAutoRead && scriptText.trim()) {
+        void ttsService.speak(scriptText, settings);
+      }
+    }
+  }, [step, settings, scriptText]);
+
+  const isTtsSpeaking =
+    ttsState.playbackState === 'loading' ||
+    ttsState.playbackState === 'speaking';
+
+  const ttsStatusBadgeLabel = (() => {
+    if (ttsState.playbackState === 'loading') {
+      return 'Förbereder AI-röst...';
+    }
+    if (ttsState.usedFallback) {
+      return 'Web Speech fallback (sv-SE)';
+    }
+    if (ttsState.playbackState === 'error' && ttsState.lastError) {
+      return ttsState.lastError;
+    }
+    if (settings.ttsEngine === 'webspeech') {
+      return 'Web Speech (sv-SE)';
+    }
+    const voiceLabel =
+      settings.ttsVoiceId === 'sv_SE-lisa-medium'
+        ? 'Lisa (Kvinna)'
+        : 'NST (Man/Neutral)';
+    if (ttsState.piperStatus && !ttsState.piperStatus.available) {
+      return `Piper ej tillgänglig – Web Speech fallback (${voiceLabel})`;
+    }
+    return `Piper AI: ${voiceLabel}`;
+  })();
 
   return (
     <div
@@ -231,7 +305,7 @@ export const PenaltyFlowModal = forwardRef<
 
           <button
             type="button"
-            onClick={onCancelClose}
+            onClick={handleCancelClick}
             className="inline-flex min-h-[48px] items-center gap-1.5 rounded-xl bg-black/25 px-3.5 py-2 text-sm font-bold text-white hover:bg-black/40 transition-colors cursor-pointer"
             title="Stäng utan att stoppa musiken (Esc)"
           >
@@ -452,7 +526,10 @@ export const PenaltyFlowModal = forwardRef<
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <button
                   type="button"
-                  onClick={() => setStep('penalty')}
+                  onClick={() => {
+                    ttsService.stop();
+                    setStep('penalty');
+                  }}
                   className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-sm font-bold text-slate-200 hover:bg-slate-700 cursor-pointer"
                 >
                   <ArrowLeft className="h-4 w-4" />
@@ -469,6 +546,50 @@ export const PenaltyFlowModal = forwardRef<
                   &ldquo;{scriptText}&rdquo;
                 </p>
               </div>
+
+              {settings.ttsEnabled && (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-950/80 p-3.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isTtsSpeaking) {
+                        ttsService.stop();
+                      } else {
+                        void ttsService.speak(scriptText, settings);
+                      }
+                    }}
+                    className={`inline-flex min-h-[56px] items-center justify-center gap-2.5 rounded-xl border px-5 py-2.5 text-sm sm:text-base font-black tracking-wide transition-colors cursor-pointer ${
+                      isTtsSpeaking
+                        ? 'border-red-400/60 bg-red-600 text-white hover:bg-red-500'
+                        : 'border-cyan-400/50 bg-cyan-600 text-white hover:bg-cyan-500 shadow-lg shadow-cyan-600/20'
+                    }`}
+                  >
+                    {ttsState.playbackState === 'loading' ? (
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                    ) : isTtsSpeaking ? (
+                      <Square className="h-5 w-5 fill-current" />
+                    ) : (
+                      <Volume2 className="h-5 w-5" />
+                    )}
+                    <span>
+                      {isTtsSpeaking
+                        ? '⏹ STOPPA UPPLÄSNING'
+                        : '🔊 LÄS UPP MANUS (AI-SPEAKER)'}
+                    </span>
+                  </button>
+
+                  <span
+                    title={ttsState.lastError ?? undefined}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-bold ${
+                      ttsState.usedFallback || ttsState.playbackState === 'error'
+                        ? 'border-amber-500/50 bg-amber-950/50 text-amber-200'
+                        : 'border-cyan-500/40 bg-cyan-950/50 text-cyan-200'
+                    }`}
+                  >
+                    {ttsStatusBadgeLabel}
+                  </span>
+                </div>
+              )}
 
               {!isTeamPenalty && playerNumber && (
                 <MissingPlayersScriptPanel
@@ -492,7 +613,7 @@ export const PenaltyFlowModal = forwardRef<
 
                 <button
                   type="button"
-                  onClick={onFadeOutAndClose}
+                  onClick={handleFadeOutClick}
                   className="inline-flex min-h-[72px] items-center justify-center rounded-2xl border border-blue-400/50 bg-blue-600 px-5 py-3 text-base font-black text-white shadow-lg shadow-blue-600/25 hover:bg-blue-500 transition-colors cursor-pointer"
                 >
                   KLAR / FADE OUT
@@ -500,7 +621,7 @@ export const PenaltyFlowModal = forwardRef<
 
                 <button
                   type="button"
-                  onClick={onKeepMusicAndClose}
+                  onClick={handleKeepMusicClick}
                   className="inline-flex min-h-[72px] items-center justify-center rounded-2xl border border-emerald-400/50 bg-emerald-700 px-5 py-3 text-base font-black text-white hover:bg-emerald-600 transition-colors cursor-pointer"
                 >
                   KLAR / BEHÅLL MUSIK

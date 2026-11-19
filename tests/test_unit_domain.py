@@ -2534,6 +2534,542 @@ console.log(JSON.stringify({
         self.assertEqual(res["directProfileInvalidDuration"], {"crossfadeDurationMs": 350})
         self.assertEqual(res["directProfileLegacyMissing"], {"duckVolume": 0.25})
 
+    def test_24_piper_voice_ids_and_length_scale(self) -> None:
+        """Verify PIPER_VOICE_IDS, isValidPiperVoiceId, isValidTtsEngine, and calculatePiperLengthScale."""
+        script = """
+import {
+  PIPER_VOICE_IDS,
+  calculatePiperLengthScale,
+  isValidPiperVoiceId,
+  isValidTtsEngine,
+} from './src/utils/domain.ts';
+
+const voiceChecks = {
+  nst: isValidPiperVoiceId('sv_SE-nst-medium'),
+  lisa: isValidPiperVoiceId('sv_SE-lisa-medium'),
+  traversalUnix: isValidPiperVoiceId('../etc/passwd'),
+  traversalWin: isValidPiperVoiceId('..\\\\..\\\\windows\\\\system32'),
+  traversalNested: isValidPiperVoiceId('sv_SE-nst-medium/../sv_SE-lisa-medium'),
+  withExt: isValidPiperVoiceId('sv_SE-nst-medium.onnx'),
+  withWhitespace: isValidPiperVoiceId(' sv_SE-nst-medium '),
+  empty: isValidPiperVoiceId(''),
+  spaces: isValidPiperVoiceId('   '),
+  otherLocale: isValidPiperVoiceId('en_US'),
+  unknownQuality: isValidPiperVoiceId('sv_SE-nst-high'),
+  nullVal: isValidPiperVoiceId(null),
+  undefinedVal: isValidPiperVoiceId(undefined),
+  numVal: isValidPiperVoiceId(123),
+};
+
+const engineChecks = {
+  piper: isValidTtsEngine('piper'),
+  webspeech: isValidTtsEngine('webspeech'),
+  invalidStr: isValidTtsEngine('elevenlabs'),
+  empty: isValidTtsEngine(''),
+  nullVal: isValidTtsEngine(null),
+  undefinedVal: isValidTtsEngine(undefined),
+};
+
+const lengthScales = {
+  rate1_0: calculatePiperLengthScale(1.0),
+  rate1_25: calculatePiperLengthScale(1.25),
+  rate0_5: calculatePiperLengthScale(0.5),
+  rate2_0: calculatePiperLengthScale(2.0),
+  rate1_5: calculatePiperLengthScale(1.5),
+  rate0_75: calculatePiperLengthScale(0.75),
+  clampLow0_1: calculatePiperLengthScale(0.1),
+  clampLowTiny: calculatePiperLengthScale(0.001),
+  clampHigh5_0: calculatePiperLengthScale(5.0),
+  clampHigh99: calculatePiperLengthScale(99),
+  zero: calculatePiperLengthScale(0),
+  negZero: calculatePiperLengthScale(-0),
+  negative: calculatePiperLengthScale(-1.5),
+  nanVal: calculatePiperLengthScale(Number.NaN),
+  posInf: calculatePiperLengthScale(Number.POSITIVE_INFINITY),
+  negInf: calculatePiperLengthScale(Number.NEGATIVE_INFINITY),
+  stringVal: calculatePiperLengthScale('1.25'),
+  undefinedVal: calculatePiperLengthScale(undefined),
+};
+
+console.log(JSON.stringify({
+  PIPER_VOICE_IDS: [...PIPER_VOICE_IDS],
+  voiceChecks,
+  engineChecks,
+  lengthScales,
+}));
+"""
+        res = run_ts_script(script)
+
+        self.assertEqual(res["PIPER_VOICE_IDS"], ["sv_SE-nst-medium", "sv_SE-lisa-medium"])
+
+        vc = res["voiceChecks"]
+        self.assertIs(vc["nst"], True)
+        self.assertIs(vc["lisa"], True)
+        for invalid_key in (
+            "traversalUnix",
+            "traversalWin",
+            "traversalNested",
+            "withExt",
+            "withWhitespace",
+            "empty",
+            "spaces",
+            "otherLocale",
+            "unknownQuality",
+            "nullVal",
+            "undefinedVal",
+            "numVal",
+        ):
+            self.assertIs(vc[invalid_key], False, f"Expected {invalid_key} to be rejected")
+
+        ec = res["engineChecks"]
+        self.assertIs(ec["piper"], True)
+        self.assertIs(ec["webspeech"], True)
+        for invalid_key in ("invalidStr", "empty", "nullVal", "undefinedVal"):
+            self.assertIs(ec[invalid_key], False, f"Expected engine {invalid_key} to be rejected")
+
+        ls = res["lengthScales"]
+        self.assertEqual(ls["rate1_0"], 1.0)
+        self.assertEqual(ls["rate1_25"], 0.8)
+        self.assertEqual(ls["rate0_5"], 2.0)
+        self.assertEqual(ls["rate2_0"], 0.5)
+        self.assertEqual(ls["rate1_5"], 0.667)
+        self.assertEqual(ls["rate0_75"], 1.333)
+        self.assertEqual(ls["clampLow0_1"], 2.0)
+        self.assertEqual(ls["clampLowTiny"], 2.0)
+        self.assertEqual(ls["clampHigh5_0"], 0.5)
+        self.assertEqual(ls["clampHigh99"], 0.5)
+        self.assertEqual(ls["zero"], 1.0)
+        self.assertEqual(ls["negZero"], 1.0)
+        self.assertEqual(ls["negative"], 1.0)
+        self.assertEqual(ls["nanVal"], 1.0)
+        self.assertEqual(ls["posInf"], 1.0)
+        self.assertEqual(ls["negInf"], 1.0)
+        self.assertEqual(ls["stringVal"], 1.0)
+        self.assertEqual(ls["undefinedVal"], 1.0)
+
+    def test_25_tts_settings_sanitize_match_config_and_profile(self) -> None:
+        """Verify backward compatibility and clamping of tts* settings in sanitizeSettings (via sanitizeMatchConfig) and sanitizeMatchProfile."""
+        script = """
+import {
+  DEFAULT_MATCH_PROFILES,
+  DEFAULT_SETTINGS,
+  DEFAULT_SOUND_PADS,
+  DEFAULT_TEAMS,
+} from './src/data/defaults.ts';
+import { sanitizeMatchConfig, sanitizeMatchProfile } from './src/utils/domain.ts';
+
+function pickTtsSettings(s) {
+  if (!s) return null;
+  return {
+    ttsEnabled: s.ttsEnabled,
+    ttsEngine: s.ttsEngine,
+    ttsVoiceId: s.ttsVoiceId,
+    ttsRate: s.ttsRate,
+    ttsVolume: s.ttsVolume,
+    ttsAutoRead: s.ttsAutoRead,
+    ttsRestoreMusicAfter: s.ttsRestoreMusicAfter,
+  };
+}
+
+// 1. Missing settings completely & legacy settings lacking tts* fields
+const missingSettingsCompletely = sanitizeMatchConfig({ version: 1 });
+const legacyWithoutTts = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    duckVolume: 0.3,
+    fadeOutDurationMs: 450,
+  },
+});
+
+// 2. Custom fallback preservation when raw settings is missing or lacks tts* fields
+const customFallbackSnapshot = {
+  version: 1,
+  teams: DEFAULT_TEAMS,
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    ...DEFAULT_SETTINGS,
+    ttsEnabled: false,
+    ttsEngine: 'webspeech',
+    ttsVoiceId: 'sv_SE-lisa-medium',
+    ttsRate: 1.4,
+    ttsVolume: 0.7,
+    ttsAutoRead: true,
+    ttsRestoreMusicAfter: false,
+  },
+};
+const nonObjectSettingsWithCustomFallback = sanitizeMatchConfig(
+  { version: 1, settings: null },
+  customFallbackSnapshot,
+);
+const legacyMissingTtsWithCustomFallback = sanitizeMatchConfig(
+  { version: 1, settings: { duckVolume: 0.15 } },
+  customFallbackSnapshot,
+);
+
+// 3. Invalid & out-of-range tts* fields in sanitizeMatchConfig (exercises sanitizeSettings)
+const invalidAndOutOfRangeLow = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    ttsEnabled: 'yes',
+    ttsEngine: 'elevenlabs',
+    ttsVoiceId: '../etc/passwd',
+    ttsRate: 0.1,
+    ttsVolume: -0.4,
+    ttsAutoRead: 'true',
+    ttsRestoreMusicAfter: 0,
+  },
+});
+
+const outOfRangeHighAndTrimmed = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    ttsEnabled: false,
+    ttsEngine: 'webspeech',
+    ttsVoiceId: '  sv_SE-lisa-medium  ',
+    ttsRate: 5.0,
+    ttsVolume: 2.5,
+    ttsAutoRead: true,
+    ttsRestoreMusicAfter: false,
+  },
+});
+
+const nanAndNumericStrings = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    ttsVoiceId: 'en_US',
+    ttsRate: 'not-a-number',
+    ttsVolume: '0.65',
+  },
+});
+
+const numericStringRateAndZeroVol = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    ttsRate: '1.35',
+    ttsVolume: 0,
+  },
+});
+
+// 4. Custom valid values preserved across config & Zustand persist envelope
+const validCustomRaw = {
+  version: 1,
+  settings: {
+    ttsEnabled: false,
+    ttsEngine: 'webspeech',
+    ttsVoiceId: 'sv_SE-lisa-medium',
+    ttsRate: 1.25,
+    ttsVolume: 0.75,
+    ttsAutoRead: true,
+    ttsRestoreMusicAfter: false,
+  },
+  matchProfiles: [
+    {
+      id: 'prof-tts-custom',
+      name: 'TTS Custom Profil',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        ttsEnabled: false,
+        ttsEngine: 'webspeech',
+        ttsVoiceId: 'sv_SE-lisa-medium',
+        ttsRate: 1.5,
+        ttsVolume: 0.8,
+        ttsAutoRead: true,
+        ttsRestoreMusicAfter: false,
+      },
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    },
+    {
+      id: 'prof-tts-legacy',
+      name: 'Äldre Profil utan TTS',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        duckVolume: 0.25,
+      },
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    },
+    {
+      id: 'prof-tts-invalid',
+      name: 'Profil med Ogiltig TTS',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        ttsEnabled: 'invalid',
+        ttsEngine: 'bogus',
+        ttsVoiceId: '../etc/shadow',
+        ttsRate: 0.1,
+        ttsVolume: 3.0,
+        ttsAutoRead: 1,
+        ttsRestoreMusicAfter: 'no',
+      },
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    },
+  ],
+};
+
+const validCustomConfig = sanitizeMatchConfig(validCustomRaw);
+const validCustomEnvelope = sanitizeMatchConfig({ state: validCustomRaw, version: 1 });
+
+// 5. Direct sanitizeMatchProfile checks
+const directProfileLegacy = sanitizeMatchProfile({
+  id: 'direct-legacy',
+  name: 'Direkt Äldre',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: { duckVolume: 0.25 },
+});
+
+const directProfileCustom = sanitizeMatchProfile({
+  id: 'direct-custom',
+  name: 'Direkt Custom',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    ttsEnabled: false,
+    ttsEngine: 'webspeech',
+    ttsVoiceId: '  sv_SE-lisa-medium ',
+    ttsRate: 1.75,
+    ttsVolume: 0.4,
+    ttsAutoRead: true,
+    ttsRestoreMusicAfter: false,
+  },
+});
+
+const directProfileInvalidLow = sanitizeMatchProfile({
+  id: 'direct-invalid-low',
+  name: 'Direkt Ogiltig Låg',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    ttsEnabled: 'false',
+    ttsEngine: 'azure',
+    ttsVoiceId: '../etc/passwd',
+    ttsRate: 0.2,
+    ttsVolume: -0.5,
+    ttsAutoRead: 'yes',
+    ttsRestoreMusicAfter: 'no',
+  },
+});
+
+const directProfileInvalidHighAndNaN = sanitizeMatchProfile({
+  id: 'direct-invalid-high',
+  name: 'Direkt Ogiltig Hög',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    ttsRate: 9.0,
+    ttsVolume: 4.5,
+  },
+});
+
+const directProfileNaN = sanitizeMatchProfile({
+  id: 'direct-nan',
+  name: 'Direkt NaN',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    ttsRate: 'abc',
+    ttsVolume: 'xyz',
+  },
+});
+
+console.log(JSON.stringify({
+  defaultSettingsTts: pickTtsSettings(DEFAULT_SETTINGS),
+  defaultProfilesTts: DEFAULT_MATCH_PROFILES.map((p) => ({
+    id: p.id,
+    ...pickTtsSettings(p.settings),
+  })),
+  missingSettingsCompletely: pickTtsSettings(missingSettingsCompletely.settings),
+  legacyWithoutTts: {
+    duckVolume: legacyWithoutTts.settings.duckVolume,
+    ...pickTtsSettings(legacyWithoutTts.settings),
+  },
+  nonObjectSettingsWithCustomFallback: pickTtsSettings(
+    nonObjectSettingsWithCustomFallback.settings,
+  ),
+  legacyMissingTtsWithCustomFallback: {
+    duckVolume: legacyMissingTtsWithCustomFallback.settings.duckVolume,
+    ...pickTtsSettings(legacyMissingTtsWithCustomFallback.settings),
+  },
+  invalidAndOutOfRangeLow: pickTtsSettings(invalidAndOutOfRangeLow.settings),
+  outOfRangeHighAndTrimmed: pickTtsSettings(outOfRangeHighAndTrimmed.settings),
+  nanAndNumericStrings: pickTtsSettings(nanAndNumericStrings.settings),
+  numericStringRateAndZeroVol: pickTtsSettings(numericStringRateAndZeroVol.settings),
+  validCustomConfig: {
+    settings: pickTtsSettings(validCustomConfig.settings),
+    profiles: validCustomConfig.matchProfiles?.map((p) => ({
+      id: p.id,
+      settings: p.settings ?? null,
+    })),
+  },
+  envelopeMatchesConfig:
+    JSON.stringify(validCustomEnvelope) === JSON.stringify(validCustomConfig),
+  directProfileLegacy: directProfileLegacy?.settings ?? null,
+  directProfileCustom: directProfileCustom?.settings ?? null,
+  directProfileInvalidLow: directProfileInvalidLow?.settings ?? null,
+  directProfileInvalidHighAndNaN: directProfileInvalidHighAndNaN?.settings ?? null,
+  directProfileNaN: directProfileNaN?.settings ?? null,
+}));
+"""
+        res = run_ts_script(script)
+
+        expected_defaults = {
+            "ttsEnabled": True,
+            "ttsEngine": "piper",
+            "ttsVoiceId": "sv_SE-nst-medium",
+            "ttsRate": 1.0,
+            "ttsVolume": 1.0,
+            "ttsAutoRead": False,
+            "ttsRestoreMusicAfter": True,
+        }
+        self.assertEqual(res["defaultSettingsTts"], expected_defaults)
+
+        self.assertGreaterEqual(len(res["defaultProfilesTts"]), 2)
+        for prof in res["defaultProfilesTts"]:
+            self.assertEqual(
+                {k: prof[k] for k in expected_defaults},
+                expected_defaults,
+            )
+
+        self.assertEqual(res["missingSettingsCompletely"], expected_defaults)
+        self.assertEqual(
+            res["legacyWithoutTts"],
+            {"duckVolume": 0.3, **expected_defaults},
+        )
+
+        expected_custom_fallback = {
+            "ttsEnabled": False,
+            "ttsEngine": "webspeech",
+            "ttsVoiceId": "sv_SE-lisa-medium",
+            "ttsRate": 1.4,
+            "ttsVolume": 0.7,
+            "ttsAutoRead": True,
+            "ttsRestoreMusicAfter": False,
+        }
+        self.assertEqual(res["nonObjectSettingsWithCustomFallback"], expected_custom_fallback)
+        self.assertEqual(
+            res["legacyMissingTtsWithCustomFallback"],
+            {"duckVolume": 0.15, **expected_custom_fallback},
+        )
+
+        self.assertEqual(
+            res["invalidAndOutOfRangeLow"],
+            {
+                "ttsEnabled": True,
+                "ttsEngine": "piper",
+                "ttsVoiceId": "sv_SE-nst-medium",
+                "ttsRate": 0.5,
+                "ttsVolume": 0.0,
+                "ttsAutoRead": False,
+                "ttsRestoreMusicAfter": True,
+            },
+        )
+        self.assertEqual(
+            res["outOfRangeHighAndTrimmed"],
+            {
+                "ttsEnabled": False,
+                "ttsEngine": "webspeech",
+                "ttsVoiceId": "sv_SE-lisa-medium",
+                "ttsRate": 2.0,
+                "ttsVolume": 1.0,
+                "ttsAutoRead": True,
+                "ttsRestoreMusicAfter": False,
+            },
+        )
+        self.assertEqual(
+            res["nanAndNumericStrings"],
+            {
+                "ttsEnabled": True,
+                "ttsEngine": "piper",
+                "ttsVoiceId": "sv_SE-nst-medium",
+                "ttsRate": 1.0,
+                "ttsVolume": 0.65,
+                "ttsAutoRead": False,
+                "ttsRestoreMusicAfter": True,
+            },
+        )
+        self.assertEqual(
+            res["numericStringRateAndZeroVol"],
+            {
+                "ttsEnabled": True,
+                "ttsEngine": "piper",
+                "ttsVoiceId": "sv_SE-nst-medium",
+                "ttsRate": 1.35,
+                "ttsVolume": 0.0,
+                "ttsAutoRead": False,
+                "ttsRestoreMusicAfter": True,
+            },
+        )
+
+        cfg = res["validCustomConfig"]
+        self.assertEqual(
+            cfg["settings"],
+            {
+                "ttsEnabled": False,
+                "ttsEngine": "webspeech",
+                "ttsVoiceId": "sv_SE-lisa-medium",
+                "ttsRate": 1.25,
+                "ttsVolume": 0.75,
+                "ttsAutoRead": True,
+                "ttsRestoreMusicAfter": False,
+            },
+        )
+        self.assertTrue(res["envelopeMatchesConfig"])
+
+        profiles_by_id = {p["id"]: p["settings"] for p in cfg["profiles"]}
+        self.assertEqual(
+            profiles_by_id["prof-tts-custom"],
+            {
+                "ttsEnabled": False,
+                "ttsEngine": "webspeech",
+                "ttsVoiceId": "sv_SE-lisa-medium",
+                "ttsRate": 1.5,
+                "ttsVolume": 0.8,
+                "ttsAutoRead": True,
+                "ttsRestoreMusicAfter": False,
+            },
+        )
+        self.assertEqual(profiles_by_id["prof-tts-legacy"], {"duckVolume": 0.25})
+        self.assertEqual(
+            profiles_by_id["prof-tts-invalid"],
+            {
+                "ttsEngine": "piper",
+                "ttsVoiceId": "sv_SE-nst-medium",
+                "ttsRate": 0.5,
+                "ttsVolume": 1.0,
+            },
+        )
+
+        self.assertEqual(res["directProfileLegacy"], {"duckVolume": 0.25})
+        self.assertEqual(
+            res["directProfileCustom"],
+            {
+                "ttsEnabled": False,
+                "ttsEngine": "webspeech",
+                "ttsVoiceId": "sv_SE-lisa-medium",
+                "ttsRate": 1.75,
+                "ttsVolume": 0.4,
+                "ttsAutoRead": True,
+                "ttsRestoreMusicAfter": False,
+            },
+        )
+        self.assertEqual(
+            res["directProfileInvalidLow"],
+            {
+                "ttsEngine": "piper",
+                "ttsVoiceId": "sv_SE-nst-medium",
+                "ttsRate": 0.5,
+                "ttsVolume": 0.0,
+            },
+        )
+        self.assertEqual(
+            res["directProfileInvalidHighAndNaN"],
+            {
+                "ttsRate": 2.0,
+                "ttsVolume": 1.0,
+            },
+        )
+        self.assertEqual(
+            res["directProfileNaN"],
+            {
+                "ttsRate": 1.0,
+                "ttsVolume": 1.0,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

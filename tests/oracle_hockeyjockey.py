@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all 5 requirements in section 4.3 of blueprints/03_oracle_and_gate_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md AND section 4.2 of 05_oracle_profiles_hotkeys_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
 4. JSON export/import round-trip (`exportMatchConfig` -> `importMatchConfig`) and headless `AudioController` execution.
 5. Git repository state, active `main` branch, and `origin` remote pointing to `5w00t3dL10n/HockeyJockey`.
+6. Zustand `useAppStore` SavedRoster library (>= 4 defaults, save with `"00"`, load to home/away, duplicate, delete).
+7. Zustand `useAppStore` MatchProfile deterministic switching (`saveCurrentAsMatchProfile` -> `activateMatchProfile`).
+8. Zustand `useAppStore` customizable hotkeys (`setActionHotkey`, `setPadHotkey` conflict transfer & pad.hotkey sync, `resetHotkeysToDefault`).
+9. Zustand `useAppStore` full JSON export/import round-trip (`exportConfigJson` -> `importConfigJson`).
 
 Deterministic exit codes:
 - 0: All oracle checks passed.
@@ -240,7 +244,13 @@ console.log(JSON.stringify({
 def check_json_roundtrip_and_audio_controller() -> None:
     """Oracle 4: Verify exportMatchConfig -> importMatchConfig round-trip and AudioController."""
     script = """
-import { DEFAULT_SETTINGS, DEFAULT_SOUND_PADS, DEFAULT_TEAMS } from './src/data/defaults.ts';
+import {
+  DEFAULT_KEY_BINDINGS,
+  DEFAULT_MATCH_PROFILES,
+  DEFAULT_SAVED_ROSTERS,
+  DEFAULT_SETTINGS,
+  DEFAULT_SOUND_PADS,
+} from './src/data/defaults.ts';
 import { AudioController } from './src/services/audioController.ts';
 import {
   exportMatchConfig,
@@ -296,11 +306,24 @@ const snapshot = {
     duckVolume: 0.25,
     fadeOutDurationMs: 450,
     spotifyClientId: 'oracle-client-id-123',
+    keyBindings: {
+      actions: { ...DEFAULT_KEY_BINDINGS.actions },
+      pads: { ...DEFAULT_KEY_BINDINGS.pads },
+    },
     scriptTemplates: {
       ...DEFAULT_SETTINGS.scriptTemplates,
       goal: 'MÅL! {team} #{scorerNumber} {scorerName}.',
     },
   },
+  savedRosters: DEFAULT_SAVED_ROSTERS.map((r) => ({ ...r, roster: { ...r.roster } })),
+  matchProfiles: DEFAULT_MATCH_PROFILES.map((p) => ({
+    ...p,
+    soundPads: p.soundPads.map((pad) => ({
+      ...pad,
+      tracks: pad.tracks.map((t) => ({ ...t })),
+    })),
+  })),
+  activeProfileId: DEFAULT_MATCH_PROFILES[0]?.id ?? null,
 };
 
 const exportedJson = exportMatchConfig(snapshot);
@@ -464,6 +487,434 @@ def check_git_and_github_remote() -> None:
         )
 
 
+def check_store_saved_rosters() -> None:
+    """Oracle 6: Verify useAppStore SavedRoster library (defaults, save with '00', load home/away, duplicate, delete)."""
+    script = """
+import { useAppStore } from './src/store/useAppStore.ts';
+
+useAppStore.getState().resetToDefaults();
+const initialRosters = useAppStore.getState().savedRosters.map((r) => ({ ...r, roster: { ...r.roster } }));
+
+// Save Roster A from home team with jersey '00'
+useAppStore.getState().updateTeamInfo('home', { name: 'Luleå HF J18', color: '#dc2626' });
+useAppStore.getState().importRoster('home', '00 Hampus Keeper\\n19 Emil Forward', 'replace');
+const rosterAId = useAppStore.getState().saveTeamToRosterLibrary('home', 'Luleå J18 Trupp', 'J18');
+
+// Save Roster B directly via upsertSavedRoster with jersey '00'
+const rosterBId = useAppStore.getState().upsertSavedRoster({
+  name: 'Skellefteå AIK U16',
+  teamName: 'Skellefteå AIK',
+  color: '#f59e0b',
+  ageGroupOrClub: 'U16',
+  roster: {
+    '00': 'Albin Målvakt',
+    '88': 'Viktor Back',
+  },
+});
+
+const loadHomeOk = useAppStore.getState().loadRosterFromLibrary(rosterBId, 'home');
+const homeAfterLoad = {
+  ...useAppStore.getState().teams.home,
+  roster: { ...useAppStore.getState().teams.home.roster },
+};
+
+const loadAwayOk = useAppStore.getState().loadRosterFromLibrary(rosterAId, 'away');
+const awayAfterLoad = {
+  ...useAppStore.getState().teams.away,
+  roster: { ...useAppStore.getState().teams.away.roster },
+};
+
+const loadMissingOk = useAppStore.getState().loadRosterFromLibrary('non-existent-roster', 'home');
+
+const dupId = useAppStore.getState().duplicateSavedRoster(rosterAId);
+const countAfterDup = useAppStore.getState().savedRosters.length;
+const duplicatedEntry = useAppStore.getState().savedRosters.find((r) => r.id === dupId) ?? null;
+
+if (dupId) {
+  useAppStore.getState().deleteSavedRoster(dupId);
+}
+const afterDeleteIds = useAppStore.getState().savedRosters.map((r) => r.id);
+
+console.log(JSON.stringify({
+  initialCount: initialRosters.length,
+  rosterAId,
+  rosterBId,
+  loadHomeOk,
+  homeAfterLoad,
+  loadAwayOk,
+  awayAfterLoad,
+  loadMissingOk,
+  dupId,
+  countAfterDup,
+  duplicatedEntry,
+  afterDeleteIds,
+}));
+"""
+    res = run_ts_script(script)
+
+    if res["initialCount"] < 4:
+        raise AssertionError(f"Expected >= 4 default saved rosters, got {res['initialCount']}")
+
+    if not res["loadHomeOk"]:
+        raise AssertionError("loadRosterFromLibrary failed for home team")
+    home = res["homeAfterLoad"]
+    if (
+        home["id"] != "home"
+        or home["name"] != "Skellefteå AIK"
+        or home["color"] != "#f59e0b"
+        or home["roster"].get("00") != "Albin Målvakt"
+        or home["roster"].get("88") != "Viktor Back"
+    ):
+        raise AssertionError(f"Unexpected home team state after loading SavedRoster: {home}")
+
+    if not res["loadAwayOk"]:
+        raise AssertionError("loadRosterFromLibrary failed for away team")
+    away = res["awayAfterLoad"]
+    if (
+        away["id"] != "away"
+        or away["name"] != "Luleå HF J18"
+        or away["color"] != "#dc2626"
+        or away["roster"].get("00") != "Hampus Keeper"
+        or away["roster"].get("19") != "Emil Forward"
+    ):
+        raise AssertionError(f"Unexpected away team state after loading SavedRoster: {away}")
+
+    if res["loadMissingOk"] is not False:
+        raise AssertionError("loadRosterFromLibrary should return false for missing rosterId")
+
+    dup_id = res["dupId"]
+    if not isinstance(dup_id, str) or not dup_id or dup_id == res["rosterAId"]:
+        raise AssertionError(f"duplicateSavedRoster returned invalid id: {dup_id!r}")
+
+    if res["countAfterDup"] != res["initialCount"] + 3:
+        raise AssertionError(
+            f"Expected {res['initialCount'] + 3} saved rosters after 2 saves + 1 duplicate, got {res['countAfterDup']}"
+        )
+
+    dup = res["duplicatedEntry"]
+    if not dup or dup["name"] != "Luleå J18 Trupp (kopia)" or dup["roster"].get("00") != "Hampus Keeper":
+        raise AssertionError(f"Unexpected duplicated SavedRoster entry: {dup}")
+
+    after_ids = res["afterDeleteIds"]
+    if dup_id in after_ids:
+        raise AssertionError(f"Deleted SavedRoster {dup_id!r} still present in savedRosters")
+    if res["rosterAId"] not in after_ids or res["rosterBId"] not in after_ids:
+        raise AssertionError("Deleting duplicate accidentally removed non-deleted SavedRosters")
+
+
+def check_store_match_profiles() -> None:
+    """Oracle 7: Verify useAppStore MatchProfile creation and deterministic back-and-forth switching."""
+    script = """
+import { useAppStore } from './src/store/useAppStore.ts';
+
+useAppStore.getState().resetToDefaults();
+
+// Configure and save Profile 1 (Youth / U10)
+useAppStore.getState().updateSettings({ duckVolume: 0.35, fadeOutDurationMs: 800 });
+useAppStore.getState().addSoundPad({
+  id: 'pad-u10-custom',
+  label: 'U10 Målklocka',
+  category: 'goal_home',
+  color: '#2563eb',
+  tracks: [
+    {
+      trackUri: 'spotify:track:1111111111111111111111',
+      title: 'U10 Song',
+      artist: 'Kids Band',
+      startTimeMs: 10000,
+    },
+  ],
+  volume: 0.9,
+  triggerFlow: 'goal_home',
+});
+useAppStore.getState().setPadHotkey('pad-u10-custom', 'Digit1');
+const profile1Id = useAppStore.getState().saveCurrentAsMatchProfile('U10 Lördagsmatch', 'U10', false);
+const activeAfterSave1 = useAppStore.getState().activeProfileId;
+
+// Configure and save Profile 2 (Senior / A-lag) with different pads, tracks, and settings
+useAppStore.getState().deleteSoundPad('pad-u10-custom');
+useAppStore.getState().addSoundPad({
+  id: 'pad-senior-custom',
+  label: 'A-Lag Intro',
+  category: 'hype',
+  color: '#dc2626',
+  tracks: [
+    {
+      trackUri: 'spotify:track:2222222222222222222222',
+      title: 'Heavy Arena Rock',
+      artist: 'Rock Band',
+      startTimeMs: 45000,
+    },
+  ],
+  volume: 1.0,
+  triggerFlow: null,
+});
+useAppStore.getState().updateSettings({ duckVolume: 0.1, fadeOutDurationMs: 300 });
+useAppStore.getState().setPadHotkey('pad-senior-custom', 'Digit2');
+const profile2Id = useAppStore.getState().saveCurrentAsMatchProfile('A-Lag Fredag', 'Senior / A-lag', false);
+const activeAfterSave2 = useAppStore.getState().activeProfileId;
+
+function snapshotActive() {
+  const st = useAppStore.getState();
+  return {
+    activeProfileId: st.activeProfileId,
+    duckVolume: st.settings.duckVolume,
+    fadeOutDurationMs: st.settings.fadeOutDurationMs,
+    padHotkeys: { ...st.settings.keyBindings.pads },
+    soundPads: st.soundPads.map((p) => ({
+      id: p.id,
+      label: p.label,
+      hotkey: p.hotkey ?? null,
+      tracks: p.tracks.map((t) => ({ ...t })),
+    })),
+  };
+}
+
+const activated1 = useAppStore.getState().activateMatchProfile(profile1Id);
+const stateP1 = snapshotActive();
+
+const activated2 = useAppStore.getState().activateMatchProfile(profile2Id);
+const stateP2 = snapshotActive();
+
+const activated1Again = useAppStore.getState().activateMatchProfile(profile1Id);
+const stateP1Again = snapshotActive();
+
+const activatedMissing = useAppStore.getState().activateMatchProfile('missing-profile-id');
+
+console.log(JSON.stringify({
+  profile1Id,
+  profile2Id,
+  activeAfterSave1,
+  activeAfterSave2,
+  activated1,
+  activated2,
+  activated1Again,
+  activatedMissing,
+  stateP1,
+  stateP2,
+  stateP1Again,
+}));
+"""
+    res = run_ts_script(script)
+
+    if res["activeAfterSave1"] != res["profile1Id"] or res["activeAfterSave2"] != res["profile2Id"]:
+        raise AssertionError("activeProfileId was not updated upon saveCurrentAsMatchProfile")
+    if not res["activated1"] or not res["activated2"] or not res["activated1Again"]:
+        raise AssertionError("activateMatchProfile unexpectedly returned false for valid profile")
+    if res["activatedMissing"] is not False:
+        raise AssertionError("activateMatchProfile should return false for unknown profileId")
+
+    p1 = res["stateP1"]
+    p2 = res["stateP2"]
+    p1_again = res["stateP1Again"]
+
+    if p1 != p1_again:
+        raise AssertionError("Switching Profile 1 -> Profile 2 -> Profile 1 was not deterministic")
+
+    p1_pad_ids = {p["id"]: p for p in p1["soundPads"]}
+    if "pad-u10-custom" not in p1_pad_ids or "pad-senior-custom" in p1_pad_ids:
+        raise AssertionError(f"Profile 1 soundPads mismatch: {list(p1_pad_ids.keys())}")
+    if (
+        p1_pad_ids["pad-u10-custom"]["tracks"][0]["title"] != "U10 Song"
+        or p1_pad_ids["pad-u10-custom"]["hotkey"] != "1"
+        or p1["duckVolume"] != 0.35
+        or p1["fadeOutDurationMs"] != 800
+        or p1["activeProfileId"] != res["profile1Id"]
+    ):
+        raise AssertionError(f"Unexpected Profile 1 state after activation: {p1}")
+
+    p2_pad_ids = {p["id"]: p for p in p2["soundPads"]}
+    if "pad-senior-custom" not in p2_pad_ids or "pad-u10-custom" in p2_pad_ids:
+        raise AssertionError(f"Profile 2 soundPads mismatch: {list(p2_pad_ids.keys())}")
+    if (
+        p2_pad_ids["pad-senior-custom"]["tracks"][0]["title"] != "Heavy Arena Rock"
+        or p2_pad_ids["pad-senior-custom"]["hotkey"] != "2"
+        or p2["duckVolume"] != 0.1
+        or p2["fadeOutDurationMs"] != 300
+        or p2["activeProfileId"] != res["profile2Id"]
+    ):
+        raise AssertionError(f"Unexpected Profile 2 state after activation: {p2}")
+
+
+def check_store_hotkeys() -> None:
+    """Oracle 8: Verify setActionHotkey, setPadHotkey (conflict transfer & pad.hotkey sync), and resetHotkeysToDefault."""
+    script = """
+import { DEFAULT_KEY_BINDINGS } from './src/data/defaults.ts';
+import { useAppStore } from './src/store/useAppStore.ts';
+
+useAppStore.getState().resetToDefaults();
+
+const replaced1 = useAppStore.getState().setActionHotkey('toggleDuck', 'KeyM');
+const toggleDuckAfterSet = useAppStore.getState().settings.keyBindings.actions.toggleDuck;
+
+const replaced2 = useAppStore.getState().setPadHotkey('pad-hype-1', 'Digit7');
+const padHypeAfterSet = useAppStore.getState().soundPads.find((p) => p.id === 'pad-hype-1')?.hotkey ?? null;
+
+// Conflict: pad-organ-1 steals 'F1' from action 'goalHome'
+const replaced3 = useAppStore.getState().setPadHotkey('pad-organ-1', 'f1');
+const stateAfterConflict1 = {
+  goalHomeAction: useAppStore.getState().settings.keyBindings.actions.goalHome,
+  padOrganBinding: useAppStore.getState().settings.keyBindings.pads['pad-organ-1'] ?? null,
+  padOrganSynced: useAppStore.getState().soundPads.find((p) => p.id === 'pad-organ-1')?.hotkey ?? null,
+};
+
+// Conflict: pad-hype-1 steals 'F1' from pad-organ-1
+const replaced4 = useAppStore.getState().setPadHotkey('pad-hype-1', 'F1');
+const stateAfterConflict2 = {
+  padOrganBinding: useAppStore.getState().settings.keyBindings.pads['pad-organ-1'] ?? null,
+  padOrganSynced: useAppStore.getState().soundPads.find((p) => p.id === 'pad-organ-1')?.hotkey ?? null,
+  padHypeBinding: useAppStore.getState().settings.keyBindings.pads['pad-hype-1'] ?? null,
+  padHypeSynced: useAppStore.getState().soundPads.find((p) => p.id === 'pad-hype-1')?.hotkey ?? null,
+};
+
+// Conflict: action 'goalHome' steals 'F1' back from pad-hype-1
+const replaced5 = useAppStore.getState().setActionHotkey('goalHome', 'F1');
+const stateAfterConflict3 = {
+  goalHomeAction: useAppStore.getState().settings.keyBindings.actions.goalHome,
+  padHypeBinding: useAppStore.getState().settings.keyBindings.pads['pad-hype-1'] ?? null,
+  padHypeSynced: useAppStore.getState().soundPads.find((p) => p.id === 'pad-hype-1')?.hotkey ?? null,
+};
+
+useAppStore.getState().resetHotkeysToDefault();
+const bindingsAfterReset = useAppStore.getState().settings.keyBindings;
+const anyPadHasHotkeyAfterReset = useAppStore.getState().soundPads.some((p) => Boolean(p.hotkey));
+
+console.log(JSON.stringify({
+  defaultKeyBindings: DEFAULT_KEY_BINDINGS,
+  replaced1,
+  toggleDuckAfterSet,
+  replaced2,
+  padHypeAfterSet,
+  replaced3,
+  stateAfterConflict1,
+  replaced4,
+  stateAfterConflict2,
+  replaced5,
+  stateAfterConflict3,
+  bindingsAfterReset,
+  anyPadHasHotkeyAfterReset,
+}));
+"""
+    res = run_ts_script(script)
+
+    if res["replaced1"] is not None or res["toggleDuckAfterSet"] != "M":
+        raise AssertionError(f"setActionHotkey failed: replaced={res['replaced1']!r}, val={res['toggleDuckAfterSet']!r}")
+    if res["replaced2"] is not None or res["padHypeAfterSet"] != "7":
+        raise AssertionError(f"setPadHotkey failed: replaced={res['replaced2']!r}, val={res['padHypeAfterSet']!r}")
+
+    if res["replaced3"] != "action:goalHome":
+        raise AssertionError(f"Expected conflict target 'action:goalHome', got {res['replaced3']!r}")
+    c1 = res["stateAfterConflict1"]
+    if c1["goalHomeAction"] != "" or c1["padOrganBinding"] != "F1" or c1["padOrganSynced"] != "F1":
+        raise AssertionError(f"Unexpected state after action->pad conflict transfer: {c1}")
+
+    if res["replaced4"] != "pad:pad-organ-1":
+        raise AssertionError(f"Expected conflict target 'pad:pad-organ-1', got {res['replaced4']!r}")
+    c2 = res["stateAfterConflict2"]
+    if (
+        c2["padOrganBinding"] is not None
+        or c2["padOrganSynced"] is not None
+        or c2["padHypeBinding"] != "F1"
+        or c2["padHypeSynced"] != "F1"
+    ):
+        raise AssertionError(f"Unexpected state after pad->pad conflict transfer: {c2}")
+
+    if res["replaced5"] != "pad:pad-hype-1":
+        raise AssertionError(f"Expected conflict target 'pad:pad-hype-1', got {res['replaced5']!r}")
+    c3 = res["stateAfterConflict3"]
+    if c3["goalHomeAction"] != "F1" or c3["padHypeBinding"] is not None or c3["padHypeSynced"] is not None:
+        raise AssertionError(f"Unexpected state after pad->action conflict transfer: {c3}")
+
+    if res["bindingsAfterReset"] != res["defaultKeyBindings"]:
+        raise AssertionError(f"resetHotkeysToDefault mismatch: {res['bindingsAfterReset']}")
+    if res["anyPadHasHotkeyAfterReset"]:
+        raise AssertionError("Some SoundPad still has a hotkey after resetHotkeysToDefault")
+
+
+def check_store_export_import_roundtrip() -> None:
+    """Oracle 9: Verify useAppStore exportConfigJson -> importConfigJson full round-trip."""
+    script = """
+import { useAppStore } from './src/store/useAppStore.ts';
+
+useAppStore.getState().resetToDefaults();
+useAppStore.getState().updateTeamInfo('home', { name: 'Kalix HC', color: '#0f172a' });
+useAppStore.getState().upsertPlayer('home', '00', 'Test Målvakt');
+const customRosterId = useAppStore.getState().saveTeamToRosterLibrary('home', 'Kalix A-Lag', 'HockeyEttan');
+
+useAppStore.getState().setActionHotkey('toggleDuck', 'KeyK');
+useAppStore.getState().setPadHotkey('pad-hype-1', 'Digit8');
+const customProfileId = useAppStore.getState().saveCurrentAsMatchProfile('Kalix Matchprofil', 'HockeyEttan', true);
+
+function captureRelevantState() {
+  const st = useAppStore.getState();
+  return {
+    teams: st.teams,
+    soundPads: st.soundPads,
+    settings: st.settings,
+    savedRosters: st.savedRosters,
+    matchProfiles: st.matchProfiles,
+    activeProfileId: st.activeProfileId,
+  };
+}
+
+const beforeExport = captureRelevantState();
+const exportedJson = useAppStore.getState().exportConfigJson();
+
+useAppStore.getState().resetToDefaults();
+const wipedState = captureRelevantState();
+
+const importedReturn = useAppStore.getState().importConfigJson(exportedJson);
+const afterImport = captureRelevantState();
+
+console.log(JSON.stringify({
+  customRosterId,
+  customProfileId,
+  beforeExport,
+  wipedState,
+  importedReturn: {
+    teams: importedReturn.teams,
+    soundPads: importedReturn.soundPads,
+    settings: importedReturn.settings,
+    savedRosters: importedReturn.savedRosters ?? [],
+    matchProfiles: importedReturn.matchProfiles ?? [],
+    activeProfileId: importedReturn.activeProfileId ?? null,
+  },
+  afterImport,
+}));
+"""
+    res = run_ts_script(script)
+
+    before = res["beforeExport"]
+    wiped = res["wipedState"]
+    imported_ret = res["importedReturn"]
+    after = res["afterImport"]
+
+    if wiped["activeProfileId"] == res["customProfileId"]:
+        raise AssertionError("resetToDefaults did not clear custom activeProfileId before import check")
+
+    for label, actual in (("store after importConfigJson", after), ("importConfigJson return value", imported_ret)):
+        if actual["savedRosters"] != before["savedRosters"]:
+            raise AssertionError(f"savedRosters mismatch in {label}")
+        if actual["matchProfiles"] != before["matchProfiles"]:
+            raise AssertionError(f"matchProfiles mismatch in {label}")
+        if actual["activeProfileId"] != res["customProfileId"]:
+            raise AssertionError(
+                f"activeProfileId mismatch in {label}: expected {res['customProfileId']!r}, got {actual['activeProfileId']!r}"
+            )
+        if actual["settings"]["keyBindings"] != before["settings"]["keyBindings"]:
+            raise AssertionError(f"settings.keyBindings mismatch in {label}")
+        if actual["teams"] != before["teams"]:
+            raise AssertionError(f"teams mismatch in {label}")
+        if actual["soundPads"] != before["soundPads"]:
+            raise AssertionError(f"soundPads mismatch in {label}")
+
+    hype_pad = next((p for p in after["soundPads"] if p["id"] == "pad-hype-1"), None)
+    if not hype_pad or hype_pad.get("hotkey") != "8":
+        raise AssertionError(f"pad-hype-1 hotkey '8' was not preserved/synced on import: {hype_pad}")
+    if after["teams"]["home"]["roster"].get("00") != "Test Målvakt":
+        raise AssertionError("Jersey '00' lost during store exportConfigJson -> importConfigJson round-trip")
+
+
 def main() -> int:
     checks = [
         ("1. Production build & dist/ artifacts", check_production_build),
@@ -471,6 +922,10 @@ def main() -> int:
         ("3. 13 Penalty definitions & RefereeIcons SVG", check_penalties_and_referee_icons),
         ("4. JSON export/import round-trip & AudioController", check_json_roundtrip_and_audio_controller),
         ("5. Git repository & origin remote", check_git_and_github_remote),
+        ("6. Store SavedRoster library (defaults, '00', load, duplicate, delete)", check_store_saved_rosters),
+        ("7. Store MatchProfile deterministic switching", check_store_match_profiles),
+        ("8. Store hotkeys (setActionHotkey, setPadHotkey, conflicts, reset)", check_store_hotkeys),
+        ("9. Store full JSON exportConfigJson -> importConfigJson round-trip", check_store_export_import_roundtrip),
     ]
 
     for label, fn in checks:
@@ -482,7 +937,7 @@ def main() -> int:
             return 1
         print(f"[ORACLE PASS] {label}", flush=True)
 
-    print("[ORACLE] All 5 objective functional oracle checks passed.", flush=True)
+    print(f"[ORACLE] All {len(checks)} objective functional oracle checks passed.", flush=True)
     return 0
 
 

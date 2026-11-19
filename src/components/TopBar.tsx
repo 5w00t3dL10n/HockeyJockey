@@ -1,5 +1,6 @@
 import {
   Disc3,
+  Layers,
   LogIn,
   LogOut,
   Mic,
@@ -9,7 +10,13 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import type { AppMode, AudioStateSnapshot } from '../types/models.ts';
+import { DEFAULT_KEY_BINDINGS } from '../data/defaults.ts';
+import type {
+  AppMode,
+  AudioStateSnapshot,
+  KeyBindings,
+  MatchProfile,
+} from '../types/models.ts';
 import { formatMsToMmSs } from '../utils/domain.ts';
 
 interface TopBarProps {
@@ -19,6 +26,10 @@ interface TopBarProps {
   isSpotifyAuthenticated: boolean;
   hasSpotifyClientId: boolean;
   duckVolume: number;
+  keyBindings?: KeyBindings;
+  matchProfiles?: MatchProfile[];
+  activeProfileId?: string | null;
+  onSelectProfile?: (profileId: string) => void;
   onConnectSpotify: () => void;
   onLogoutSpotify: () => void;
   onVolumeChange: (volume: number) => void;
@@ -34,6 +45,10 @@ export function TopBar({
   isSpotifyAuthenticated,
   hasSpotifyClientId,
   duckVolume,
+  keyBindings = DEFAULT_KEY_BINDINGS,
+  matchProfiles = [],
+  activeProfileId = null,
+  onSelectProfile,
   onConnectSpotify,
   onLogoutSpotify,
   onVolumeChange,
@@ -45,10 +60,14 @@ export function TopBar({
   const duckPercent = Math.round(duckVolume * 100);
   const isSpotifyConnected = audioState.mode === 'spotify';
 
+  const duckHotkey = keyBindings.actions.toggleDuck;
+  const fadeOutHotkey = keyBindings.actions.fadeOut;
+  const hardStopHotkey = keyBindings.actions.hardStop;
+
   return (
     <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md shadow-lg">
       <div className="mx-auto max-w-[1600px] px-4 py-3 space-y-3">
-        {/* Top Row: Brand, Spotify Status, Mode Switcher */}
+        {/* Top Row: Brand, Spotify Status, Profile Switcher, Mode Switcher */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2.5">
@@ -115,36 +134,76 @@ export function TopBar({
             )}
           </div>
 
-          {/* Mode Switcher */}
-          <nav
-            aria-label="Huvudlägen"
-            className="inline-flex rounded-xl border border-slate-700 bg-slate-950 p-1"
-          >
-            <button
-              type="button"
-              onClick={() => onChangeMode('match')}
-              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition-colors cursor-pointer ${
-                mode === 'match'
-                  ? 'bg-blue-600 text-white shadow'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800'
-              }`}
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Quick Match Profile Selector */}
+            {matchProfiles.length > 0 && onSelectProfile && (
+              <div className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-950/80 px-2.5 py-1.5">
+                <Layers className="h-4 w-4 text-blue-400 shrink-0" />
+                <label
+                  htmlFor="topbar-profile-select"
+                  className="text-xs font-bold text-slate-400 hidden sm:inline"
+                >
+                  Profil:
+                </label>
+                <select
+                  id="topbar-profile-select"
+                  aria-label="Aktiv matchprofil"
+                  value={activeProfileId ?? ''}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    if (nextId) {
+                      onSelectProfile(nextId);
+                    }
+                    e.currentTarget.blur();
+                  }}
+                  className="rounded-lg bg-slate-900 px-2 py-1 text-xs font-bold text-slate-100 focus:outline-none cursor-pointer"
+                >
+                  {!activeProfileId && (
+                    <option value="">Anpassad (ej sparad)</option>
+                  )}
+                  {matchProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name}
+                      {profile.clubOrAgeGroup
+                        ? ` (${profile.clubOrAgeGroup})`
+                        : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Mode Switcher */}
+            <nav
+              aria-label="Huvudlägen"
+              className="inline-flex rounded-xl border border-slate-700 bg-slate-950 p-1"
             >
-              <Sliders className="h-4 w-4" />
-              Matchläge
-            </button>
-            <button
-              type="button"
-              onClick={() => onChangeMode('setup')}
-              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition-colors cursor-pointer ${
-                mode === 'setup'
-                  ? 'bg-blue-600 text-white shadow'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800'
-              }`}
-            >
-              <Settings className="h-4 w-4" />
-              Förberedelseläge
-            </button>
-          </nav>
+              <button
+                type="button"
+                onClick={() => onChangeMode('match')}
+                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition-colors cursor-pointer ${
+                  mode === 'match'
+                    ? 'bg-blue-600 text-white shadow'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                <Sliders className="h-4 w-4" />
+                Matchläge
+              </button>
+              <button
+                type="button"
+                onClick={() => onChangeMode('setup')}
+                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition-colors cursor-pointer ${
+                  mode === 'setup'
+                    ? 'bg-blue-600 text-white shadow'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                <Settings className="h-4 w-4" />
+                Förberedelseläge
+              </button>
+            </nav>
+          </div>
         </div>
 
         {/* Bottom Row: Current Track + Volume + Permanent Global Booth Controls */}
@@ -218,38 +277,56 @@ export function TopBar({
                   ? 'border-amber-400 bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/25'
                   : 'border-amber-500/50 bg-amber-950/50 text-amber-200 hover:bg-amber-900/60'
               }`}
-              title="Kortkommando: D"
+              title={
+                duckHotkey
+                  ? `Kortkommando: ${duckHotkey}`
+                  : 'Inget kortkommando bundet'
+              }
             >
               <Mic className="h-4 w-4" />
               <span>DUCKA / PRATA</span>
-              <kbd className="hidden sm:inline-block rounded bg-black/25 px-1.5 py-0.5 font-mono text-[10px]">
-                D
-              </kbd>
+              {duckHotkey && (
+                <kbd className="rounded bg-black/25 px-1.5 py-0.5 font-mono text-[10px]">
+                  [{duckHotkey}]
+                </kbd>
+              )}
             </button>
 
             <button
               type="button"
               onClick={onFadeOut}
               className="inline-flex min-h-[52px] items-center justify-center gap-2 rounded-xl border border-blue-400/50 bg-blue-600 px-5 py-2 text-sm font-extrabold tracking-wide text-white shadow-lg shadow-blue-600/25 hover:bg-blue-500 active:scale-[0.98] transition-all cursor-pointer"
-              title="Kortkommando: Space"
+              title={
+                fadeOutHotkey
+                  ? `Kortkommando: ${fadeOutHotkey}`
+                  : 'Inget kortkommando bundet'
+              }
             >
               <span>FADE OUT / SLÄPP PUCK</span>
-              <kbd className="hidden sm:inline-block rounded bg-black/25 px-1.5 py-0.5 font-mono text-[10px]">
-                SPACE
-              </kbd>
+              {fadeOutHotkey && (
+                <kbd className="rounded bg-black/25 px-1.5 py-0.5 font-mono text-[10px]">
+                  [{fadeOutHotkey}]
+                </kbd>
+              )}
             </button>
 
             <button
               type="button"
               onClick={onHardStop}
               className="inline-flex min-h-[52px] items-center justify-center gap-2 rounded-xl border border-red-400/60 bg-red-600 px-4 py-2 text-sm font-extrabold tracking-wide text-white shadow-lg shadow-red-600/25 hover:bg-red-500 active:scale-[0.98] transition-all cursor-pointer"
-              title="Kortkommando: Shift + Space"
+              title={
+                hardStopHotkey
+                  ? `Kortkommando: ${hardStopHotkey}`
+                  : 'Inget kortkommando bundet'
+              }
             >
               <Square className="h-4 w-4 fill-current" />
               <span>TVÄRSTOPP</span>
-              <kbd className="hidden sm:inline-block rounded bg-black/25 px-1.5 py-0.5 font-mono text-[10px]">
-                ⇧ SPACE
-              </kbd>
+              {hardStopHotkey && (
+                <kbd className="rounded bg-black/25 px-1.5 py-0.5 font-mono text-[10px]">
+                  [{hardStopHotkey}]
+                </kbd>
+              )}
             </button>
           </div>
         </div>

@@ -28,6 +28,20 @@ export type PadCategory =
   | 'organ'
   | 'misc';
 
+export type MatchActionId =
+  | 'fadeOut'
+  | 'hardStop'
+  | 'toggleDuck'
+  | 'goalHome'
+  | 'goalAway'
+  | 'penaltyHome'
+  | 'penaltyAway';
+
+export interface KeyBindings {
+  actions: Record<MatchActionId, string>;
+  pads: Record<string, string>;
+}
+
 export interface SoundPad {
   id: string;
   label: string;
@@ -37,6 +51,7 @@ export interface SoundPad {
   lastPlayedIndex?: number;
   volume?: number; // Default 1.0
   triggerFlow?: 'penalty_home' | 'penalty_away' | 'goal_home' | 'goal_away' | null;
+  hotkey?: string;
 }
 
 export interface PenaltyDefinition {
@@ -51,12 +66,41 @@ export interface AppSettings {
   fadeOutDurationMs: number; // T.ex. 600
   spotifyClientId: string;
   spotifyRedirectUri: string;
+  keyBindings: KeyBindings;
   scriptTemplates: {
     penalty: string; // "{team} drar på sig en utvisning genom nummer {number}, {name}, {duration} för {reason}."
     penaltyTeam: string; // "Lagstraff för {team}, {duration} för {reason}."
     goal: string; // "Mål för {team}! Målskytt nummer {scorerNumber}, {scorerName}."
     goalWithAssist: string; // "Mål för {team}! Målskytt nummer {scorerNumber}, {scorerName}. Framspelad av {assists}."
   };
+}
+
+export interface SavedRoster {
+  id: string;
+  name: string;
+  teamName: string;
+  color: string;
+  ageGroupOrClub?: string;
+  roster: Record<string, string>;
+  updatedAt: string;
+}
+
+export interface MatchProfile {
+  id: string;
+  name: string;
+  clubOrAgeGroup?: string;
+  soundPads: SoundPad[];
+  teams?: {
+    home: Team;
+    away: Team;
+  };
+  settings?: Partial<
+    Pick<
+      AppSettings,
+      'duckVolume' | 'fadeOutDurationMs' | 'scriptTemplates' | 'keyBindings'
+    >
+  >;
+  updatedAt: string;
 }
 
 export interface MatchConfigSnapshot {
@@ -67,6 +111,9 @@ export interface MatchConfigSnapshot {
   };
   soundPads: SoundPad[];
   settings: AppSettings;
+  savedRosters?: SavedRoster[];
+  matchProfiles?: MatchProfile[];
+  activeProfileId?: string | null;
 }
 
 export type AppMode = 'match' | 'setup';

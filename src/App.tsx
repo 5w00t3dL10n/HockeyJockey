@@ -45,7 +45,12 @@ export function App() {
   const teams = useAppStore((s) => s.teams);
   const soundPads = useAppStore((s) => s.soundPads);
   const settings = useAppStore((s) => s.settings);
+  const savedRosters = useAppStore((s) => s.savedRosters);
+  const matchProfiles = useAppStore((s) => s.matchProfiles);
+  const activeProfileId = useAppStore((s) => s.activeProfileId);
   const advancePadRotation = useAppStore((s) => s.advancePadRotation);
+  const loadRosterFromLibrary = useAppStore((s) => s.loadRosterFromLibrary);
+  const activateMatchProfile = useAppStore((s) => s.activateMatchProfile);
 
   const modalRef = useRef<ModalKeyboardHandle | null>(null);
   const oauthHandledRef = useRef(false);
@@ -250,14 +255,47 @@ export function App() {
     );
   }, []);
 
+  const handleTriggerPadById = useCallback(
+    (padId: string) => {
+      const pad = useAppStore.getState().soundPads.find((p) => p.id === padId);
+      if (!pad) {
+        return;
+      }
+      if (pad.triggerFlow === 'goal_home') {
+        setActiveModal({ type: 'goal', teamId: 'home' });
+        return;
+      }
+      if (pad.triggerFlow === 'goal_away') {
+        setActiveModal({ type: 'goal', teamId: 'away' });
+        return;
+      }
+      if (pad.triggerFlow === 'penalty_home') {
+        setActiveModal({ type: 'penalty', teamId: 'home' });
+        return;
+      }
+      if (pad.triggerFlow === 'penalty_away') {
+        setActiveModal({ type: 'penalty', teamId: 'away' });
+        return;
+      }
+      playSoundPad(pad);
+    },
+    [playSoundPad],
+  );
+
   useKeyboardShortcuts({
     isModalOpen: activeModal !== null,
+    keyBindings: settings.keyBindings,
     fadeOutDurationMs: settings.fadeOutDurationMs,
     duckVolume: settings.duckVolume,
     isDucked: audioState.isDucked,
     onFadeOut: handleFadeOut,
     onHardStop: handleHardStop,
     onToggleDuck: handleToggleDuck,
+    onGoalHome: () => setActiveModal({ type: 'goal', teamId: 'home' }),
+    onGoalAway: () => setActiveModal({ type: 'goal', teamId: 'away' }),
+    onPenaltyHome: () => setActiveModal({ type: 'penalty', teamId: 'home' }),
+    onPenaltyAway: () => setActiveModal({ type: 'penalty', teamId: 'away' }),
+    onTriggerPadById: handleTriggerPadById,
     onModalDigit: (digit) => modalRef.current?.onDigit(digit),
     onModalBackspace: () => modalRef.current?.onBackspace(),
     onModalEnter: () => modalRef.current?.onEnter(),
@@ -273,6 +311,12 @@ export function App() {
         isSpotifyAuthenticated={isSpotifyAuthenticated}
         hasSpotifyClientId={Boolean(settings.spotifyClientId.trim())}
         duckVolume={settings.duckVolume}
+        keyBindings={settings.keyBindings}
+        matchProfiles={matchProfiles}
+        activeProfileId={activeProfileId}
+        onSelectProfile={(profileId) =>
+          activateMatchProfile(profileId, { loadTeams: false })
+        }
         onConnectSpotify={handleConnectSpotify}
         onLogoutSpotify={handleLogoutSpotify}
         onVolumeChange={(vol) => void audioController.setVolumeImmediate(vol)}
@@ -306,6 +350,16 @@ export function App() {
             teams={teams}
             soundPads={soundPads}
             audioState={audioState}
+            keyBindings={settings.keyBindings}
+            savedRosters={savedRosters}
+            matchProfiles={matchProfiles}
+            activeProfileId={activeProfileId}
+            onSelectRoster={(rosterId, targetTeamId) =>
+              loadRosterFromLibrary(rosterId, targetTeamId)
+            }
+            onSelectProfile={(profileId) =>
+              activateMatchProfile(profileId, { loadTeams: false })
+            }
             onTriggerGoal={(teamId) =>
               setActiveModal({ type: 'goal', teamId })
             }

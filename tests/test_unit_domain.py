@@ -375,6 +375,352 @@ console.log(JSON.stringify({
             self.assertNotIn("{", text, f"Unreplaced placeholder in {key}: {text}")
             self.assertNotIn("}", text, f"Unreplaced placeholder in {key}: {text}")
 
+    def test_07_normalize_and_format_hotkeys(self) -> None:
+        """Verify normalizeHotkeyString and formatHotkeyFromEvent including modifiers and edge cases."""
+        script = """
+import { formatHotkeyFromEvent, normalizeHotkeyString } from './src/utils/domain.ts';
+
+const normalized = {
+  spaceLower: normalizeHotkeyString('space'),
+  spaceChar: normalizeHotkeyString(' '),
+  shiftSpace: normalizeHotkeyString('shift+space'),
+  keyD: normalizeHotkeyString('KeyD'),
+  lowerD: normalizeHotkeyString('d'),
+  f1: normalizeHotkeyString('f1'),
+  digit1: normalizeHotkeyString('Digit1'),
+  shiftDigit1: normalizeHotkeyString('shift+Digit1'),
+  reorderedMods: normalizeHotkeyString('shift+ctrl+KeyD'),
+  modShiftOnly: normalizeHotkeyString('Shift'),
+  modCtrlOnly: normalizeHotkeyString('Ctrl'),
+  modControlOnly: normalizeHotkeyString('Control'),
+  modAltOnly: normalizeHotkeyString('Alt'),
+  modMetaOnly: normalizeHotkeyString('Meta'),
+  modShiftLeftOnly: normalizeHotkeyString('ShiftLeft'),
+  empty: normalizeHotkeyString(''),
+  whitespace: normalizeHotkeyString('   '),
+};
+
+const formatted = {
+  evSpace: formatHotkeyFromEvent({ key: ' ', code: 'Space' }),
+  evShiftSpace: formatHotkeyFromEvent({ key: ' ', code: 'Space', shiftKey: true }),
+  evKeyDLower: formatHotkeyFromEvent({ key: 'd', code: 'KeyD' }),
+  evKeyDUpper: formatHotkeyFromEvent({ key: 'D', code: 'KeyD' }),
+  evKeyDNoCode: formatHotkeyFromEvent({ key: 'd' }),
+  evF1: formatHotkeyFromEvent({ key: 'F1', code: 'F1' }),
+  evDigit1ShiftBang: formatHotkeyFromEvent({ key: '!', code: 'Digit1', shiftKey: true }),
+  evDigit1ShiftOne: formatHotkeyFromEvent({ key: '1', code: 'Digit1', shiftKey: true }),
+  evStandaloneShift: formatHotkeyFromEvent({ key: 'Shift', code: 'ShiftLeft', shiftKey: true }),
+  evStandaloneCtrl: formatHotkeyFromEvent({ key: 'Control', code: 'ControlLeft', ctrlKey: true }),
+  evStandaloneAlt: formatHotkeyFromEvent({ key: 'Alt', code: 'AltLeft', altKey: true }),
+  evStandaloneMeta: formatHotkeyFromEvent({ key: 'Meta', code: 'MetaLeft', metaKey: true }),
+};
+
+console.log(JSON.stringify({ normalized, formatted }));
+"""
+        res = run_ts_script(script)
+        n = res["normalized"]
+        self.assertEqual(n["spaceLower"], "Space")
+        self.assertEqual(n["spaceChar"], "Space")
+        self.assertEqual(n["shiftSpace"], "Shift+Space")
+        self.assertEqual(n["keyD"], "D")
+        self.assertEqual(n["lowerD"], "D")
+        self.assertEqual(n["f1"], "F1")
+        self.assertEqual(n["digit1"], "1")
+        self.assertEqual(n["shiftDigit1"], "Shift+1")
+        self.assertEqual(n["reorderedMods"], "Ctrl+Shift+D")
+
+        for mod_key in (
+            "modShiftOnly",
+            "modCtrlOnly",
+            "modControlOnly",
+            "modAltOnly",
+            "modMetaOnly",
+            "modShiftLeftOnly",
+            "empty",
+            "whitespace",
+        ):
+            self.assertEqual(n[mod_key], "", f"Expected '' for {mod_key}, got {n[mod_key]!r}")
+
+        f = res["formatted"]
+        self.assertEqual(f["evSpace"], "Space")
+        self.assertEqual(f["evShiftSpace"], "Shift+Space")
+        self.assertEqual(f["evKeyDLower"], "D")
+        self.assertEqual(f["evKeyDUpper"], "D")
+        self.assertEqual(f["evKeyDNoCode"], "D")
+        self.assertEqual(f["evF1"], "F1")
+        self.assertEqual(f["evDigit1ShiftBang"], "Shift+1")
+        self.assertEqual(f["evDigit1ShiftOne"], "Shift+1")
+
+        for standalone_key in (
+            "evStandaloneShift",
+            "evStandaloneCtrl",
+            "evStandaloneAlt",
+            "evStandaloneMeta",
+        ):
+            self.assertEqual(
+                f[standalone_key],
+                "",
+                f"Expected '' for {standalone_key}, got {f[standalone_key]!r}",
+            )
+
+    def test_08_assign_hotkey_and_resolve_hotkey_match(self) -> None:
+        """Verify assignHotkey (actions, pads, conflict resolution, clearing) and resolveHotkeyMatch."""
+        script = """
+import { DEFAULT_KEY_BINDINGS } from './src/data/defaults.ts';
+import { assignHotkey, resolveHotkeyMatch } from './src/utils/domain.ts';
+
+const initial = {
+  actions: { ...DEFAULT_KEY_BINDINGS.actions },
+  pads: { ...DEFAULT_KEY_BINDINGS.pads },
+};
+
+// 1. Assign non-conflicting key to MatchActionId
+const step1 = assignHotkey(initial, { type: 'action', id: 'toggleDuck' }, 'KeyM');
+const matchM = resolveHotkeyMatch(step1.keyBindings, 'm');
+const matchOldD = resolveHotkeyMatch(step1.keyBindings, 'd');
+
+// 2. Assign non-conflicting key to SoundPad
+const step2 = assignHotkey(step1.keyBindings, { type: 'pad', id: 'pad-organ-1' }, 'Digit1');
+const match1 = resolveHotkeyMatch(step2.keyBindings, '1');
+
+// 3. Conflict resolution: Pad steals key from Action ('goalHome' currently has 'F1')
+const step3 = assignHotkey(step2.keyBindings, { type: 'pad', id: 'pad-hype-1' }, 'f1');
+const matchF1AfterPadSteal = resolveHotkeyMatch(step3.keyBindings, 'F1');
+
+// 4. Conflict resolution: Action steals key from Pad ('pad-organ-1' currently has '1')
+const step4 = assignHotkey(step3.keyBindings, { type: 'action', id: 'goalHome' }, 'Digit1');
+const match1AfterActionSteal = resolveHotkeyMatch(step4.keyBindings, '1');
+
+// 5. Conflict resolution: Pad steals key from another Pad ('pad-hype-1' currently has 'F1')
+const step5 = assignHotkey(step4.keyBindings, { type: 'pad', id: 'pad-misc-timeout' }, 'F1');
+const matchF1AfterPadToPad = resolveHotkeyMatch(step5.keyBindings, 'F1');
+
+// 6. Conflict resolution: Action steals key from another Action ('fadeOut' currently has 'Space')
+const step6 = assignHotkey(step5.keyBindings, { type: 'action', id: 'hardStop' }, 'space');
+const matchSpaceAfterActionToAction = resolveHotkeyMatch(step6.keyBindings, 'Space');
+
+// 7. Re-assigning same key to same target produces null replacedTarget
+const step7Same = assignHotkey(step6.keyBindings, { type: 'action', id: 'hardStop' }, 'Space');
+
+// 8. Clearing action and pad bindings with ''
+const step8ClearAction = assignHotkey(step7Same.keyBindings, { type: 'action', id: 'hardStop' }, '');
+const matchSpaceAfterClear = resolveHotkeyMatch(step8ClearAction.keyBindings, 'Space');
+
+const step9ClearPad = assignHotkey(step8ClearAction.keyBindings, { type: 'pad', id: 'pad-misc-timeout' }, '');
+const matchF1AfterClear = resolveHotkeyMatch(step9ClearPad.keyBindings, 'F1');
+
+console.log(JSON.stringify({
+  initialToggleDuckPreserved: initial.actions.toggleDuck,
+  step1Replaced: step1.replacedTarget,
+  step1ToggleDuck: step1.keyBindings.actions.toggleDuck,
+  matchM,
+  matchOldD,
+  step2Replaced: step2.replacedTarget,
+  step2PadOrgan: step2.keyBindings.pads['pad-organ-1'],
+  match1,
+  step3Replaced: step3.replacedTarget,
+  step3GoalHome: step3.keyBindings.actions.goalHome,
+  step3PadHype: step3.keyBindings.pads['pad-hype-1'],
+  matchF1AfterPadSteal,
+  step4Replaced: step4.replacedTarget,
+  step4HasPadOrgan: 'pad-organ-1' in step4.keyBindings.pads,
+  step4GoalHome: step4.keyBindings.actions.goalHome,
+  match1AfterActionSteal,
+  step5Replaced: step5.replacedTarget,
+  step5HasPadHype: 'pad-hype-1' in step5.keyBindings.pads,
+  step5PadMisc: step5.keyBindings.pads['pad-misc-timeout'],
+  matchF1AfterPadToPad,
+  step6Replaced: step6.replacedTarget,
+  step6FadeOut: step6.keyBindings.actions.fadeOut,
+  step6HardStop: step6.keyBindings.actions.hardStop,
+  matchSpaceAfterActionToAction,
+  step7Replaced: step7Same.replacedTarget,
+  step8Replaced: step8ClearAction.replacedTarget,
+  step8HardStop: step8ClearAction.keyBindings.actions.hardStop,
+  matchSpaceAfterClear,
+  step9Replaced: step9ClearPad.replacedTarget,
+  step9HasPadMisc: 'pad-misc-timeout' in step9ClearPad.keyBindings.pads,
+  matchF1AfterClear,
+}));
+"""
+        res = run_ts_script(script)
+        self.assertEqual(res["initialToggleDuckPreserved"], "D")
+        self.assertIsNone(res["step1Replaced"])
+        self.assertEqual(res["step1ToggleDuck"], "M")
+        self.assertEqual(res["matchM"], {"type": "action", "id": "toggleDuck"})
+        self.assertIsNone(res["matchOldD"])
+
+        self.assertIsNone(res["step2Replaced"])
+        self.assertEqual(res["step2PadOrgan"], "1")
+        self.assertEqual(res["match1"], {"type": "pad", "id": "pad-organ-1"})
+
+        self.assertEqual(res["step3Replaced"], "action:goalHome")
+        self.assertEqual(res["step3GoalHome"], "")
+        self.assertEqual(res["step3PadHype"], "F1")
+        self.assertEqual(res["matchF1AfterPadSteal"], {"type": "pad", "id": "pad-hype-1"})
+
+        self.assertEqual(res["step4Replaced"], "pad:pad-organ-1")
+        self.assertFalse(res["step4HasPadOrgan"])
+        self.assertEqual(res["step4GoalHome"], "1")
+        self.assertEqual(res["match1AfterActionSteal"], {"type": "action", "id": "goalHome"})
+
+        self.assertEqual(res["step5Replaced"], "pad:pad-hype-1")
+        self.assertFalse(res["step5HasPadHype"])
+        self.assertEqual(res["step5PadMisc"], "F1")
+        self.assertEqual(res["matchF1AfterPadToPad"], {"type": "pad", "id": "pad-misc-timeout"})
+
+        self.assertEqual(res["step6Replaced"], "action:fadeOut")
+        self.assertEqual(res["step6FadeOut"], "")
+        self.assertEqual(res["step6HardStop"], "Space")
+        self.assertEqual(res["matchSpaceAfterActionToAction"], {"type": "action", "id": "hardStop"})
+
+        self.assertIsNone(res["step7Replaced"])
+
+        self.assertIsNone(res["step8Replaced"])
+        self.assertEqual(res["step8HardStop"], "")
+        self.assertIsNone(res["matchSpaceAfterClear"])
+
+        self.assertIsNone(res["step9Replaced"])
+        self.assertFalse(res["step9HasPadMisc"])
+        self.assertIsNone(res["matchF1AfterClear"])
+
+    def test_09_backward_compatible_sanitize_match_config(self) -> None:
+        """Verify legacy snapshots without keyBindings/savedRosters/matchProfiles and empty spotifyClientId migrate without data loss."""
+        script = """
+import {
+  DEFAULT_KEY_BINDINGS,
+  DEFAULT_MATCH_PROFILES,
+  DEFAULT_SAVED_ROSTERS,
+  DEFAULT_SPOTIFY_CLIENT_ID,
+} from './src/data/defaults.ts';
+import { sanitizeMatchConfig } from './src/utils/domain.ts';
+
+const legacySnapshot = {
+  version: 1,
+  teams: {
+    home: {
+      id: 'home',
+      name: 'Hudiksvall HC',
+      color: '#1e3a8a',
+      roster: {
+        '00': 'Olle Målvakt',
+        '19': 'Karl Kämpe',
+      },
+    },
+    away: {
+      id: 'away',
+      name: 'Njurunda SK',
+      color: '#b91c1c',
+      roster: {
+        '00': 'Kalle Keeper',
+        '88': 'Viktor Forward',
+      },
+    },
+  },
+  soundPads: [
+    {
+      id: 'legacy-pad-goal',
+      label: 'Legacy Mållåt',
+      category: 'goal_home',
+      color: '#2563eb',
+      volume: 0.75,
+      triggerFlow: 'goal_home',
+      tracks: [
+        {
+          trackUri: 'spotify:track:2KH16WveTQWT6KOG9Rg6e2',
+          title: 'Legacy Goal Anthem',
+          artist: 'Legacy Artist',
+          startTimeMs: 12000,
+        },
+      ],
+    },
+    {
+      id: 'legacy-pad-hype',
+      label: 'Legacy Pepp',
+      category: 'hype',
+      color: '#059669',
+      volume: 0.9,
+      triggerFlow: null,
+      tracks: [
+        {
+          trackUri: 'spotify:track:4uLU6hMCjMI75M1A2tKUQC',
+          title: 'Legacy Hype Track',
+          artist: 'Arena',
+          startTimeMs: 30000,
+        },
+      ],
+    },
+  ],
+  settings: {
+    duckVolume: 0.32,
+    fadeOutDurationMs: 750,
+    spotifyClientId: '',
+    spotifyRedirectUri: 'http://127.0.0.1:5173/callback',
+    scriptTemplates: {
+      penalty: '{team} utvisning #{number} {name}, {duration} ({reason}).',
+      penaltyTeam: 'Lagstraff {team}, {duration} {reason}.',
+      goal: 'Mål {team} #{scorerNumber} {scorerName}!',
+      goalWithAssist: 'Mål {team} #{scorerNumber} {scorerName}, assist {assists}.',
+    },
+  },
+};
+
+const migrated = sanitizeMatchConfig(legacySnapshot);
+const migratedFromEnvelope = sanitizeMatchConfig({ state: legacySnapshot, version: 1 });
+
+const legacyWithPadHotkey = {
+  ...legacySnapshot,
+  soundPads: [
+    legacySnapshot.soundPads[0],
+    { ...legacySnapshot.soundPads[1], hotkey: 'Digit9' },
+  ],
+};
+const migratedWithPadHotkey = sanitizeMatchConfig(legacyWithPadHotkey);
+
+console.log(JSON.stringify({
+  legacySnapshot,
+  migrated,
+  migratedFromEnvelope,
+  migratedWithPadHotkey,
+  expectedClientId: DEFAULT_SPOTIFY_CLIENT_ID,
+  expectedKeyBindings: DEFAULT_KEY_BINDINGS,
+  expectedSavedRosters: DEFAULT_SAVED_ROSTERS,
+  expectedMatchProfiles: DEFAULT_MATCH_PROFILES,
+}));
+"""
+        res = run_ts_script(script)
+        legacy = res["legacySnapshot"]
+        migrated = res["migrated"]
+
+        self.assertEqual(res["expectedClientId"], "35b681ec04634ec3a6a5083ce87216c4")
+        self.assertEqual(migrated["settings"]["spotifyClientId"], "35b681ec04634ec3a6a5083ce87216c4")
+        self.assertEqual(migrated["settings"]["keyBindings"], res["expectedKeyBindings"])
+        self.assertEqual(migrated["savedRosters"], res["expectedSavedRosters"])
+        self.assertGreaterEqual(len(migrated["savedRosters"]), 4)
+        self.assertEqual(migrated["matchProfiles"], res["expectedMatchProfiles"])
+        self.assertGreaterEqual(len(migrated["matchProfiles"]), 2)
+
+        # Verify zero data loss in existing teams, soundPads, and settings
+        self.assertEqual(migrated["teams"], legacy["teams"])
+        self.assertEqual(migrated["teams"]["home"]["roster"]["00"], "Olle Målvakt")
+        self.assertEqual(migrated["teams"]["away"]["roster"]["00"], "Kalle Keeper")
+        self.assertEqual(migrated["soundPads"], legacy["soundPads"])
+        self.assertEqual(migrated["settings"]["duckVolume"], 0.32)
+        self.assertEqual(migrated["settings"]["fadeOutDurationMs"], 750)
+        self.assertEqual(migrated["settings"]["scriptTemplates"], legacy["settings"]["scriptTemplates"])
+
+        # Verify Zustand persist envelope migration produces identical output
+        self.assertEqual(res["migratedFromEnvelope"], migrated)
+
+        # Verify legacy pad.hotkey adoption without losing DEFAULT_KEY_BINDINGS.actions
+        with_hotkey = res["migratedWithPadHotkey"]
+        self.assertEqual(
+            with_hotkey["settings"]["keyBindings"]["actions"],
+            res["expectedKeyBindings"]["actions"],
+        )
+        self.assertEqual(with_hotkey["settings"]["keyBindings"]["pads"].get("legacy-pad-hype"), "9")
+        self.assertEqual(with_hotkey["soundPads"][1].get("hotkey"), "9")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

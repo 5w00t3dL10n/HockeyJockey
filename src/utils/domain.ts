@@ -1,13 +1,22 @@
 import {
   ALL_PAD_CATEGORIES,
+  DEFAULT_KEY_BINDINGS,
+  DEFAULT_MATCH_PROFILES,
+  DEFAULT_SAVED_ROSTERS,
   DEFAULT_SETTINGS,
   DEFAULT_SOUND_PADS,
+  DEFAULT_SPOTIFY_CLIENT_ID,
   DEFAULT_TEAMS,
+  MATCH_ACTION_IDS,
 } from '../data/defaults.ts';
 import type {
   AppSettings,
+  KeyBindings,
+  MatchActionId,
   MatchConfigSnapshot,
+  MatchProfile,
   PadCategory,
+  SavedRoster,
   SoundPad,
   Team,
   TrackCue,
@@ -54,7 +63,73 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function cloneKeyBindings(kb?: KeyBindings): KeyBindings {
+  const source = kb ?? DEFAULT_KEY_BINDINGS;
+  return {
+    actions: {
+      ...DEFAULT_KEY_BINDINGS.actions,
+      ...(source.actions ?? {}),
+    },
+    pads: { ...(source.pads ?? {}) },
+  };
+}
+
+function cloneSoundPads(pads: SoundPad[]): SoundPad[] {
+  return pads.map((pad) => ({
+    ...pad,
+    tracks: pad.tracks.map((track) => ({ ...track })),
+  }));
+}
+
+function cloneSavedRoster(roster: SavedRoster): SavedRoster {
+  return {
+    ...roster,
+    roster: { ...roster.roster },
+  };
+}
+
+function cloneMatchProfile(profile: MatchProfile): MatchProfile {
+  return {
+    ...profile,
+    soundPads: cloneSoundPads(profile.soundPads),
+    ...(profile.teams
+      ? {
+          teams: {
+            home: {
+              ...profile.teams.home,
+              roster: { ...profile.teams.home.roster },
+            },
+            away: {
+              ...profile.teams.away,
+              roster: { ...profile.teams.away.roster },
+            },
+          },
+        }
+      : {}),
+    ...(profile.settings
+      ? {
+          settings: {
+            ...profile.settings,
+            ...(profile.settings.scriptTemplates
+              ? { scriptTemplates: { ...profile.settings.scriptTemplates } }
+              : {}),
+            ...(profile.settings.keyBindings
+              ? { keyBindings: cloneKeyBindings(profile.settings.keyBindings) }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 function cloneDefaultSnapshot(): MatchConfigSnapshot {
+  const settings: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    spotifyClientId: DEFAULT_SETTINGS.spotifyClientId || DEFAULT_SPOTIFY_CLIENT_ID,
+    keyBindings: cloneKeyBindings(DEFAULT_KEY_BINDINGS),
+    scriptTemplates: { ...DEFAULT_SETTINGS.scriptTemplates },
+  };
+
   return {
     version: 1,
     teams: {
@@ -67,14 +142,14 @@ function cloneDefaultSnapshot(): MatchConfigSnapshot {
         roster: { ...DEFAULT_TEAMS.away.roster },
       },
     },
-    soundPads: DEFAULT_SOUND_PADS.map((pad) => ({
-      ...pad,
-      tracks: pad.tracks.map((track) => ({ ...track })),
-    })),
-    settings: {
-      ...DEFAULT_SETTINGS,
-      scriptTemplates: { ...DEFAULT_SETTINGS.scriptTemplates },
-    },
+    soundPads: syncPadsWithKeyBindings(
+      cloneSoundPads(DEFAULT_SOUND_PADS),
+      settings.keyBindings,
+    ),
+    settings,
+    savedRosters: DEFAULT_SAVED_ROSTERS.map(cloneSavedRoster),
+    matchProfiles: DEFAULT_MATCH_PROFILES.map(cloneMatchProfile),
+    activeProfileId: DEFAULT_MATCH_PROFILES[0]?.id ?? null,
   };
 }
 
@@ -399,6 +474,426 @@ export async function generatePkceChallenge(verifier: string): Promise<string> {
   return bytesToBase64Url(new Uint8Array(digest));
 }
 
+const MODIFIER_ORDER = ['Ctrl', 'Alt', 'Shift', 'Meta'] as const;
+
+const MODIFIER_ALIASES: Record<string, (typeof MODIFIER_ORDER)[number]> = {
+  ctrl: 'Ctrl',
+  control: 'Ctrl',
+  ctrlkey: 'Ctrl',
+  alt: 'Alt',
+  option: 'Alt',
+  altkey: 'Alt',
+  altgr: 'Alt',
+  shift: 'Shift',
+  shiftkey: 'Shift',
+  meta: 'Meta',
+  cmd: 'Meta',
+  command: 'Meta',
+  super: 'Meta',
+  win: 'Meta',
+  windows: 'Meta',
+  os: 'Meta',
+  metakey: 'Meta',
+};
+
+const STANDALONE_MODIFIER_KEYS = new Set([
+  'shift',
+  'shiftleft',
+  'shiftright',
+  'control',
+  'controlleft',
+  'controlright',
+  'ctrl',
+  'alt',
+  'altleft',
+  'altright',
+  'altgraph',
+  'meta',
+  'metaleft',
+  'metaright',
+  'os',
+  'osleft',
+  'osright',
+  'super',
+  'win',
+  'cmd',
+  'command',
+  'option',
+  'dead',
+  'unidentified',
+  'process',
+]);
+
+const NAMED_KEY_MAP: Record<string, string> = {
+  space: 'Space',
+  spacebar: 'Space',
+  esc: 'Escape',
+  escape: 'Escape',
+  enter: 'Enter',
+  return: 'Enter',
+  tab: 'Tab',
+  backspace: 'Backspace',
+  delete: 'Delete',
+  del: 'Delete',
+  insert: 'Insert',
+  ins: 'Insert',
+  home: 'Home',
+  end: 'End',
+  pageup: 'PageUp',
+  pagedown: 'PageDown',
+  arrowup: 'ArrowUp',
+  up: 'ArrowUp',
+  arrowdown: 'ArrowDown',
+  down: 'ArrowDown',
+  arrowleft: 'ArrowLeft',
+  left: 'ArrowLeft',
+  arrowright: 'ArrowRight',
+  right: 'ArrowRight',
+  plus: 'Plus',
+};
+
+function normalizeBaseKeyToken(rawToken: string): string {
+  if (rawToken === ' ') {
+    return 'Space';
+  }
+  const trimmed = rawToken.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (STANDALONE_MODIFIER_KEYS.has(lower) || lower in MODIFIER_ALIASES) {
+    return '';
+  }
+
+  if (lower in NAMED_KEY_MAP) {
+    return NAMED_KEY_MAP[lower];
+  }
+
+  const keyLetterMatch = /^key([a-z])$/i.exec(trimmed);
+  if (keyLetterMatch) {
+    return keyLetterMatch[1].toUpperCase();
+  }
+
+  const digitMatch = /^digit([0-9])$/i.exec(trimmed);
+  if (digitMatch) {
+    return digitMatch[1];
+  }
+
+  const numpadDigitMatch = /^numpad([0-9])$/i.exec(trimmed);
+  if (numpadDigitMatch) {
+    return `Numpad${numpadDigitMatch[1]}`;
+  }
+
+  const fnMatch = /^f([1-9]|1[0-9]|2[0-4])$/i.exec(trimmed);
+  if (fnMatch) {
+    return `F${fnMatch[1]}`;
+  }
+
+  if (/^[a-zåäö]$/i.test(trimmed)) {
+    return trimmed.toUpperCase();
+  }
+
+  if (/^[0-9]$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (trimmed === '+') {
+    return 'Plus';
+  }
+
+  if (trimmed.length === 1 && !/\s/.test(trimmed)) {
+    return trimmed;
+  }
+
+  return '';
+}
+
+export function normalizeHotkeyString(input: string): string {
+  if (typeof input !== 'string' || input.length === 0) {
+    return '';
+  }
+
+  if (input === ' ') {
+    return 'Space';
+  }
+
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  if (trimmed === '+') {
+    return 'Plus';
+  }
+
+  const parts = trimmed
+    .split('+')
+    .map((part) => (part === ' ' ? 'Space' : part.trim()))
+    .filter((part) => part.length > 0);
+
+  if (parts.length === 0) {
+    return '';
+  }
+
+  const modifiers = new Set<(typeof MODIFIER_ORDER)[number]>();
+  const keys: string[] = [];
+
+  for (const part of parts) {
+    const lower = part.toLowerCase();
+    const mappedModifier = MODIFIER_ALIASES[lower];
+    if (mappedModifier) {
+      modifiers.add(mappedModifier);
+    } else {
+      keys.push(part);
+    }
+  }
+
+  if (keys.length !== 1) {
+    return '';
+  }
+
+  const normalizedKey = normalizeBaseKeyToken(keys[0]);
+  if (!normalizedKey) {
+    return '';
+  }
+
+  const orderedModifiers = MODIFIER_ORDER.filter((mod) => modifiers.has(mod));
+  return [...orderedModifiers, normalizedKey].join('+');
+}
+
+export function formatHotkeyFromEvent(event: {
+  key: string;
+  code?: string;
+  shiftKey?: boolean;
+  ctrlKey?: boolean;
+  altKey?: boolean;
+  metaKey?: boolean;
+}): string {
+  if (!event || typeof event.key !== 'string') {
+    return '';
+  }
+
+  const lowerKey = event.key.toLowerCase();
+  const lowerCode = typeof event.code === 'string' ? event.code.toLowerCase() : '';
+  if (
+    STANDALONE_MODIFIER_KEYS.has(lowerKey) ||
+    (lowerCode && STANDALONE_MODIFIER_KEYS.has(lowerCode))
+  ) {
+    return '';
+  }
+
+  let baseKey = '';
+  const code = typeof event.code === 'string' ? event.code : '';
+  if (code) {
+    if (code === 'Space') {
+      baseKey = 'Space';
+    } else {
+      const codeKeyMatch = /^Key([A-Z])$/i.exec(code);
+      const codeDigitMatch = /^Digit([0-9])$/i.exec(code);
+      const codeFnMatch = /^F([1-9]|1[0-9]|2[0-4])$/i.exec(code);
+      const codeNumpadMatch = /^Numpad([0-9])$/i.exec(code);
+
+      if (codeKeyMatch) {
+        baseKey = codeKeyMatch[1].toUpperCase();
+      } else if (codeDigitMatch) {
+        baseKey = codeDigitMatch[1];
+      } else if (codeFnMatch) {
+        baseKey = `F${codeFnMatch[1]}`;
+      } else if (codeNumpadMatch) {
+        baseKey = `Numpad${codeNumpadMatch[1]}`;
+      }
+    }
+  }
+
+  if (!baseKey) {
+    baseKey = normalizeBaseKeyToken(event.key);
+  }
+
+  if (!baseKey) {
+    return '';
+  }
+
+  const parts: string[] = [];
+  if (event.ctrlKey) {
+    parts.push('Ctrl');
+  }
+  if (event.altKey) {
+    parts.push('Alt');
+  }
+  if (event.shiftKey) {
+    parts.push('Shift');
+  }
+  if (event.metaKey) {
+    parts.push('Meta');
+  }
+  parts.push(baseKey);
+
+  return normalizeHotkeyString(parts.join('+'));
+}
+
+export function assignHotkey(
+  bindings: KeyBindings,
+  target: { type: 'action'; id: MatchActionId } | { type: 'pad'; id: string },
+  hotkey: string,
+): { keyBindings: KeyBindings; replacedTarget: string | null } {
+  const base = cloneKeyBindings(bindings);
+  const normalized = normalizeHotkeyString(hotkey);
+
+  if (!normalized) {
+    if (target.type === 'action') {
+      base.actions[target.id] = '';
+    } else {
+      delete base.pads[target.id];
+    }
+    return {
+      keyBindings: base,
+      replacedTarget: null,
+    };
+  }
+
+  let replacedTarget: string | null = null;
+
+  for (const actionId of MATCH_ACTION_IDS) {
+    if (target.type === 'action' && actionId === target.id) {
+      continue;
+    }
+    const existing = normalizeHotkeyString(base.actions[actionId] ?? '');
+    if (existing && existing === normalized) {
+      base.actions[actionId] = '';
+      if (!replacedTarget) {
+        replacedTarget = `action:${actionId}`;
+      }
+    }
+  }
+
+  for (const padId of Object.keys(base.pads)) {
+    if (target.type === 'pad' && padId === target.id) {
+      continue;
+    }
+    const existing = normalizeHotkeyString(base.pads[padId] ?? '');
+    if (existing && existing === normalized) {
+      delete base.pads[padId];
+      if (!replacedTarget) {
+        replacedTarget = `pad:${padId}`;
+      }
+    }
+  }
+
+  if (target.type === 'action') {
+    base.actions[target.id] = normalized;
+  } else {
+    base.pads[target.id] = normalized;
+  }
+
+  return {
+    keyBindings: base,
+    replacedTarget,
+  };
+}
+
+export function resolveHotkeyMatch(
+  bindings: KeyBindings,
+  hotkey: string,
+): { type: 'action'; id: MatchActionId } | { type: 'pad'; id: string } | null {
+  const normalized = normalizeHotkeyString(hotkey);
+  if (!normalized || !bindings) {
+    return null;
+  }
+
+  for (const actionId of MATCH_ACTION_IDS) {
+    const bound = normalizeHotkeyString(bindings.actions?.[actionId] ?? '');
+    if (bound && bound === normalized) {
+      return { type: 'action', id: actionId };
+    }
+  }
+
+  for (const [padId, rawBound] of Object.entries(bindings.pads ?? {})) {
+    const bound = normalizeHotkeyString(rawBound ?? '');
+    if (bound && bound === normalized) {
+      return { type: 'pad', id: padId };
+    }
+  }
+
+  return null;
+}
+
+export function sanitizeKeyBindings(
+  rawBindings: unknown,
+  fallback?: KeyBindings,
+  validPadIds?: Set<string>,
+): KeyBindings {
+  const base = cloneKeyBindings(fallback ?? DEFAULT_KEY_BINDINGS);
+  const rawActions =
+    isPlainObject(rawBindings) && isPlainObject(rawBindings.actions)
+      ? rawBindings.actions
+      : null;
+  const rawPads =
+    isPlainObject(rawBindings) && isPlainObject(rawBindings.pads)
+      ? rawBindings.pads
+      : null;
+
+  const usedHotkeys = new Set<string>();
+  const actions = {} as Record<MatchActionId, string>;
+
+  for (const actionId of MATCH_ACTION_IDS) {
+    let candidate = '';
+    if (rawActions && actionId in rawActions) {
+      const rawVal = rawActions[actionId];
+      candidate = typeof rawVal === 'string' ? normalizeHotkeyString(rawVal) : '';
+    } else {
+      candidate = normalizeHotkeyString(base.actions[actionId] ?? '');
+    }
+
+    if (candidate && !usedHotkeys.has(candidate)) {
+      usedHotkeys.add(candidate);
+      actions[actionId] = candidate;
+    } else {
+      actions[actionId] = '';
+    }
+  }
+
+  const pads: Record<string, string> = {};
+  const padSource = rawPads ?? base.pads;
+  for (const [rawPadId, rawVal] of Object.entries(padSource)) {
+    const padId = rawPadId.trim();
+    if (!padId) {
+      continue;
+    }
+    if (validPadIds && !validPadIds.has(padId)) {
+      continue;
+    }
+    if (typeof rawVal !== 'string') {
+      continue;
+    }
+    const normalized = normalizeHotkeyString(rawVal);
+    if (!normalized || usedHotkeys.has(normalized)) {
+      continue;
+    }
+    usedHotkeys.add(normalized);
+    pads[padId] = normalized;
+  }
+
+  return {
+    actions,
+    pads,
+  };
+}
+
+export function syncPadsWithKeyBindings(
+  pads: SoundPad[],
+  keyBindings: KeyBindings,
+): SoundPad[] {
+  return pads.map((pad) => {
+    const bound = normalizeHotkeyString(keyBindings.pads[pad.id] ?? '');
+    if (bound) {
+      return { ...pad, hotkey: bound };
+    }
+    const { hotkey: _removed, ...rest } = pad;
+    return rest;
+  });
+}
+
 function sanitizeTeam(
   rawTeam: unknown,
   id: 'home' | 'away',
@@ -475,10 +970,7 @@ function sanitizeSoundPads(
   fallback: SoundPad[],
 ): SoundPad[] {
   if (!Array.isArray(rawPads)) {
-    return fallback.map((pad) => ({
-      ...pad,
-      tracks: pad.tracks.map((track) => ({ ...track })),
-    }));
+    return cloneSoundPads(fallback);
   }
 
   const sanitized: SoundPad[] = [];
@@ -532,6 +1024,11 @@ function sanitizeSoundPads(
         ? (rawPad.triggerFlow as SoundPad['triggerFlow'])
         : null;
 
+    const hotkey =
+      typeof rawPad.hotkey === 'string'
+        ? normalizeHotkeyString(rawPad.hotkey)
+        : '';
+
     sanitized.push({
       id,
       label,
@@ -541,6 +1038,7 @@ function sanitizeSoundPads(
       lastPlayedIndex,
       volume,
       triggerFlow,
+      ...(hotkey ? { hotkey } : {}),
     });
   });
 
@@ -550,10 +1048,18 @@ function sanitizeSoundPads(
 function sanitizeSettings(
   rawSettings: unknown,
   fallback: AppSettings,
+  validPadIds?: Set<string>,
 ): AppSettings {
+  const defaultClientId = fallback.spotifyClientId || DEFAULT_SPOTIFY_CLIENT_ID;
   if (!isPlainObject(rawSettings)) {
     return {
       ...fallback,
+      spotifyClientId: defaultClientId,
+      keyBindings: sanitizeKeyBindings(
+        undefined,
+        fallback.keyBindings,
+        validPadIds,
+      ),
       scriptTemplates: { ...fallback.scriptTemplates },
     };
   }
@@ -561,6 +1067,11 @@ function sanitizeSettings(
   const rawTemplates = isPlainObject(rawSettings.scriptTemplates)
     ? rawSettings.scriptTemplates
     : {};
+
+  const rawClientId =
+    typeof rawSettings.spotifyClientId === 'string'
+      ? rawSettings.spotifyClientId.trim()
+      : '';
 
   return {
     duckVolume: clampNumber(
@@ -577,15 +1088,17 @@ function sanitizeSettings(
         fallback.fadeOutDurationMs,
       ),
     ),
-    spotifyClientId:
-      typeof rawSettings.spotifyClientId === 'string'
-        ? rawSettings.spotifyClientId.trim()
-        : fallback.spotifyClientId,
+    spotifyClientId: rawClientId || defaultClientId,
     spotifyRedirectUri:
       typeof rawSettings.spotifyRedirectUri === 'string' &&
       rawSettings.spotifyRedirectUri.trim()
         ? rawSettings.spotifyRedirectUri.trim()
         : fallback.spotifyRedirectUri,
+    keyBindings: sanitizeKeyBindings(
+      rawSettings.keyBindings,
+      fallback.keyBindings,
+      validPadIds,
+    ),
     scriptTemplates: {
       penalty:
         typeof rawTemplates.penalty === 'string' && rawTemplates.penalty.trim()
@@ -609,6 +1122,174 @@ function sanitizeSettings(
   };
 }
 
+export function sanitizeSavedRoster(
+  rawRoster: unknown,
+  fallbackIndex = 0,
+): SavedRoster | null {
+  if (!isPlainObject(rawRoster)) {
+    return null;
+  }
+
+  const id =
+    typeof rawRoster.id === 'string' && rawRoster.id.trim()
+      ? rawRoster.id.trim()
+      : `roster-imported-${fallbackIndex + 1}`;
+
+  const rawTeamName =
+    typeof rawRoster.teamName === 'string' ? rawRoster.teamName.trim() : '';
+  const rawName =
+    typeof rawRoster.name === 'string' ? rawRoster.name.trim() : '';
+  const teamName = rawTeamName || rawName || `Lag ${fallbackIndex + 1}`;
+  const name = rawName || teamName;
+
+  const color =
+    typeof rawRoster.color === 'string' && HEX_COLOR_REGEX.test(rawRoster.color.trim())
+      ? rawRoster.color.trim()
+      : '#2563eb';
+
+  const ageGroupOrClub =
+    typeof rawRoster.ageGroupOrClub === 'string' && rawRoster.ageGroupOrClub.trim()
+      ? rawRoster.ageGroupOrClub.trim()
+      : undefined;
+
+  const roster: Record<string, string> = {};
+  if (isPlainObject(rawRoster.roster)) {
+    for (const [key, val] of Object.entries(rawRoster.roster)) {
+      const num = key.trim();
+      if (num && typeof val === 'string' && val.trim()) {
+        roster[num] = val.trim();
+      }
+    }
+  }
+
+  const updatedAt =
+    typeof rawRoster.updatedAt === 'string' && rawRoster.updatedAt.trim()
+      ? rawRoster.updatedAt.trim()
+      : '2026-01-01T00:00:00.000Z';
+
+  return {
+    id,
+    name,
+    teamName,
+    color,
+    ...(ageGroupOrClub ? { ageGroupOrClub } : {}),
+    roster,
+    updatedAt,
+  };
+}
+
+export function sanitizeMatchProfile(
+  rawProfile: unknown,
+  fallbackIndex = 0,
+): MatchProfile | null {
+  if (!isPlainObject(rawProfile)) {
+    return null;
+  }
+
+  const id =
+    typeof rawProfile.id === 'string' && rawProfile.id.trim()
+      ? rawProfile.id.trim()
+      : `profile-imported-${fallbackIndex + 1}`;
+
+  const name =
+    typeof rawProfile.name === 'string' && rawProfile.name.trim()
+      ? rawProfile.name.trim()
+      : `Matchprofil ${fallbackIndex + 1}`;
+
+  const clubOrAgeGroup =
+    typeof rawProfile.clubOrAgeGroup === 'string' &&
+    rawProfile.clubOrAgeGroup.trim()
+      ? rawProfile.clubOrAgeGroup.trim()
+      : undefined;
+
+  let soundPads = sanitizeSoundPads(rawProfile.soundPads, DEFAULT_SOUND_PADS);
+  const validPadIds = new Set(soundPads.map((p) => p.id));
+
+  const teams = isPlainObject(rawProfile.teams)
+    ? {
+        home: sanitizeTeam(rawProfile.teams.home, 'home', DEFAULT_TEAMS.home),
+        away: sanitizeTeam(rawProfile.teams.away, 'away', DEFAULT_TEAMS.away),
+      }
+    : undefined;
+
+  let settings: MatchProfile['settings'];
+  if (isPlainObject(rawProfile.settings)) {
+    const rawSettings = rawProfile.settings;
+    const sanitizedSettings: NonNullable<MatchProfile['settings']> = {};
+
+    if (rawSettings.duckVolume !== undefined) {
+      sanitizedSettings.duckVolume = clampNumber(
+        Number(rawSettings.duckVolume),
+        0.0,
+        1.0,
+        DEFAULT_SETTINGS.duckVolume,
+      );
+    }
+
+    if (rawSettings.fadeOutDurationMs !== undefined) {
+      sanitizedSettings.fadeOutDurationMs = Math.round(
+        clampNumber(
+          Number(rawSettings.fadeOutDurationMs),
+          0,
+          10000,
+          DEFAULT_SETTINGS.fadeOutDurationMs,
+        ),
+      );
+    }
+
+    if (isPlainObject(rawSettings.scriptTemplates)) {
+      const tpl = rawSettings.scriptTemplates;
+      sanitizedSettings.scriptTemplates = {
+        penalty:
+          typeof tpl.penalty === 'string' && tpl.penalty.trim()
+            ? tpl.penalty
+            : DEFAULT_SETTINGS.scriptTemplates.penalty,
+        penaltyTeam:
+          typeof tpl.penaltyTeam === 'string' && tpl.penaltyTeam.trim()
+            ? tpl.penaltyTeam
+            : DEFAULT_SETTINGS.scriptTemplates.penaltyTeam,
+        goal:
+          typeof tpl.goal === 'string' && tpl.goal.trim()
+            ? tpl.goal
+            : DEFAULT_SETTINGS.scriptTemplates.goal,
+        goalWithAssist:
+          typeof tpl.goalWithAssist === 'string' && tpl.goalWithAssist.trim()
+            ? tpl.goalWithAssist
+            : DEFAULT_SETTINGS.scriptTemplates.goalWithAssist,
+      };
+    }
+
+    if (isPlainObject(rawSettings.keyBindings)) {
+      sanitizedSettings.keyBindings = sanitizeKeyBindings(
+        rawSettings.keyBindings,
+        DEFAULT_KEY_BINDINGS,
+        validPadIds,
+      );
+      soundPads = syncPadsWithKeyBindings(
+        soundPads,
+        sanitizedSettings.keyBindings,
+      );
+    }
+
+    settings = sanitizedSettings;
+  }
+
+  const updatedAt =
+    typeof rawProfile.updatedAt === 'string' && rawProfile.updatedAt.trim()
+      ? rawProfile.updatedAt.trim()
+      : '2026-01-01T00:00:00.000Z';
+
+  return {
+    id,
+    name,
+    ...(clubOrAgeGroup ? { clubOrAgeGroup } : {}),
+    soundPads,
+    ...(teams ? { teams } : {}),
+    ...(settings ? { settings } : {}),
+    updatedAt,
+  };
+}
+
 export function sanitizeMatchConfig(
   raw: unknown,
   fallback?: MatchConfigSnapshot,
@@ -618,9 +1299,68 @@ export function sanitizeMatchConfig(
     return base;
   }
 
-  // Support Zustand persist envelope `{ state: { teams, soundPads, settings }, version }`
+  // Support Zustand persist envelope `{ state: { teams, soundPads, settings, ... }, version }`
   const source = isPlainObject(raw.state) ? raw.state : raw;
   const rawTeams = isPlainObject(source.teams) ? source.teams : {};
+
+  const rawSanitizedPads = sanitizeSoundPads(source.soundPads, base.soundPads);
+  const validPadIds = new Set(rawSanitizedPads.map((pad) => pad.id));
+
+  let settings = sanitizeSettings(source.settings, base.settings, validPadIds);
+
+  // If legacy/imported snapshot had no explicit keyBindings, adopt any valid pad.hotkey
+  const hasExplicitKeyBindings =
+    isPlainObject(source.settings) && isPlainObject(source.settings.keyBindings);
+  if (!hasExplicitKeyBindings) {
+    let adoptedBindings = settings.keyBindings;
+    for (const pad of rawSanitizedPads) {
+      if (pad.hotkey) {
+        const alreadyTaken = resolveHotkeyMatch(adoptedBindings, pad.hotkey);
+        if (!alreadyTaken) {
+          adoptedBindings = assignHotkey(
+            adoptedBindings,
+            { type: 'pad', id: pad.id },
+            pad.hotkey,
+          ).keyBindings;
+        }
+      }
+    }
+    settings = {
+      ...settings,
+      keyBindings: adoptedBindings,
+    };
+  }
+
+  const soundPads = syncPadsWithKeyBindings(
+    rawSanitizedPads,
+    settings.keyBindings,
+  );
+
+  const savedRosters = Array.isArray(source.savedRosters)
+    ? source.savedRosters
+        .map((item, idx) => sanitizeSavedRoster(item, idx))
+        .filter((item): item is SavedRoster => item !== null)
+    : (base.savedRosters ?? DEFAULT_SAVED_ROSTERS).map(cloneSavedRoster);
+
+  const matchProfiles = Array.isArray(source.matchProfiles)
+    ? source.matchProfiles
+        .map((item, idx) => sanitizeMatchProfile(item, idx))
+        .filter((item): item is MatchProfile => item !== null)
+    : (base.matchProfiles ?? DEFAULT_MATCH_PROFILES).map(cloneMatchProfile);
+
+  let activeProfileId: string | null = null;
+  if (typeof source.activeProfileId === 'string' && source.activeProfileId.trim()) {
+    const candidateId = source.activeProfileId.trim();
+    activeProfileId = matchProfiles.some((p) => p.id === candidateId)
+      ? candidateId
+      : null;
+  } else if (source.activeProfileId === null) {
+    activeProfileId = null;
+  } else if (!Array.isArray(source.soundPads) && base.activeProfileId) {
+    activeProfileId = matchProfiles.some((p) => p.id === base.activeProfileId)
+      ? base.activeProfileId
+      : null;
+  }
 
   return {
     version:
@@ -631,8 +1371,11 @@ export function sanitizeMatchConfig(
       home: sanitizeTeam(rawTeams.home, 'home', base.teams.home),
       away: sanitizeTeam(rawTeams.away, 'away', base.teams.away),
     },
-    soundPads: sanitizeSoundPads(source.soundPads, base.soundPads),
-    settings: sanitizeSettings(source.settings, base.settings),
+    soundPads,
+    settings,
+    savedRosters,
+    matchProfiles,
+    activeProfileId,
   };
 }
 

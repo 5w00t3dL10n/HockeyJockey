@@ -1,23 +1,34 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
 import {
+  DEFAULT_KEY_BINDINGS,
+  DEFAULT_MATCH_PROFILES,
+  DEFAULT_SAVED_ROSTERS,
   DEFAULT_SETTINGS,
   DEFAULT_SOUND_PADS,
   DEFAULT_TEAMS,
 } from '../data/defaults.ts';
 import type {
   AppSettings,
+  KeyBindings,
+  MatchActionId,
   MatchConfigSnapshot,
+  MatchProfile,
+  SavedRoster,
   SoundPad,
   Team,
   TrackCue,
 } from '../types/models.ts';
 import {
+  assignHotkey,
   exportMatchConfig,
   importMatchConfig,
   parseRosterText,
+  sanitizeKeyBindings,
   sanitizeMatchConfig,
+  sanitizeSavedRoster,
   selectNextTrack,
+  syncPadsWithKeyBindings,
 } from '../utils/domain.ts';
 
 export const APP_STORAGE_KEY = 'hockey_dj_state_v1';
@@ -68,12 +79,51 @@ const safeStateStorage: StateStorage = {
   },
 };
 
+function generateId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function cloneKeyBindings(kb: KeyBindings): KeyBindings {
+  return {
+    actions: { ...kb.actions },
+    pads: { ...kb.pads },
+  };
+}
+
+function cloneSoundPads(pads: SoundPad[]): SoundPad[] {
+  return pads.map((pad) => ({
+    ...pad,
+    tracks: pad.tracks.map((track) => ({ ...track })),
+  }));
+}
+
+function cloneTeams(teams: { home: Team; away: Team }): {
+  home: Team;
+  away: Team;
+} {
+  return {
+    home: {
+      ...teams.home,
+      id: 'home',
+      roster: { ...teams.home.roster },
+    },
+    away: {
+      ...teams.away,
+      id: 'away',
+      roster: { ...teams.away.roster },
+    },
+  };
+}
+
 function createInitialSnapshot(): MatchConfigSnapshot {
   return sanitizeMatchConfig({
     version: 1,
     teams: DEFAULT_TEAMS,
     soundPads: DEFAULT_SOUND_PADS,
     settings: DEFAULT_SETTINGS,
+    savedRosters: DEFAULT_SAVED_ROSTERS,
+    matchProfiles: DEFAULT_MATCH_PROFILES,
+    activeProfileId: DEFAULT_MATCH_PROFILES[0]?.id ?? null,
   });
 }
 
@@ -84,6 +134,9 @@ export interface AppStoreState {
   };
   soundPads: SoundPad[];
   settings: AppSettings;
+  savedRosters: SavedRoster[];
+  matchProfiles: MatchProfile[];
+  activeProfileId: string | null;
 
   updateTeamInfo: (
     teamId: 'home' | 'away',
@@ -123,6 +176,40 @@ export interface AppStoreState {
   updateScriptTemplates: (
     updates: Partial<AppSettings['scriptTemplates']>,
   ) => void;
+
+  setActionHotkey: (actionId: MatchActionId, hotkey: string) => string | null;
+  setPadHotkey: (padId: string, hotkey: string) => string | null;
+  resetHotkeysToDefault: () => void;
+
+  saveTeamToRosterLibrary: (
+    teamId: 'home' | 'away',
+    customName?: string,
+    ageGroupOrClub?: string,
+    existingRosterId?: string,
+  ) => string;
+  loadRosterFromLibrary: (
+    rosterId: string,
+    targetTeamId: 'home' | 'away',
+  ) => boolean;
+  upsertSavedRoster: (
+    roster: Omit<SavedRoster, 'id' | 'updatedAt'> & { id?: string },
+  ) => string;
+  deleteSavedRoster: (rosterId: string) => void;
+  duplicateSavedRoster: (rosterId: string) => string | null;
+
+  saveCurrentAsMatchProfile: (
+    name: string,
+    clubOrAgeGroup?: string,
+    includeTeams?: boolean,
+    existingProfileId?: string,
+  ) => string;
+  activateMatchProfile: (
+    profileId: string,
+    options?: { loadTeams?: boolean },
+  ) => boolean;
+  deleteMatchProfile: (profileId: string) => void;
+  duplicateMatchProfile: (profileId: string) => string | null;
+
   exportConfigJson: () => string;
   importConfigJson: (jsonString: string) => MatchConfigSnapshot;
   resetToDefaults: () => void;
@@ -136,6 +223,9 @@ export const useAppStore = create<AppStoreState>()(
       teams: initial.teams,
       soundPads: initial.soundPads,
       settings: initial.settings,
+      savedRosters: initial.savedRosters ?? [],
+      matchProfiles: initial.matchProfiles ?? [],
+      activeProfileId: initial.activeProfileId ?? null,
 
       updateTeamInfo: (teamId, updates) =>
         set((state) => ({
@@ -217,9 +307,7 @@ export const useAppStore = create<AppStoreState>()(
         })),
 
       addSoundPad: (pad) => {
-        const id =
-          pad.id?.trim() ||
-          `pad-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const id = pad.id?.trim() || generateId('pad');
         const newPad: SoundPad = {
           id,
           label: pad.label.trim() || 'Ny knapp',
@@ -230,15 +318,41 @@ export const useAppStore = create<AppStoreState>()(
           volume: pad.volume ?? 1.0,
           triggerFlow: pad.triggerFlow ?? null,
         };
-        set((state) => ({
-          soundPads: [...state.soundPads, newPad],
-        }));
+        set((state) => {
+          let nextKeyBindings = state.settings.keyBindings;
+          if (pad.hotkey) {
+            nextKeyBindings = assignHotkey(
+              nextKeyBindings,
+              { type: 'pad', id },
+              pad.hotkey,
+            ).keyBindings;
+          }
+          const nextPads = syncPadsWithKeyBindings(
+            [...state.soundPads, newPad],
+            nextKeyBindings,
+          );
+          return {
+            soundPads: nextPads,
+            settings: {
+              ...state.settings,
+              keyBindings: nextKeyBindings,
+            },
+          };
+        });
         return id;
       },
 
       updateSoundPad: (padId, updates) =>
-        set((state) => ({
-          soundPads: state.soundPads.map((pad) =>
+        set((state) => {
+          let nextKeyBindings = state.settings.keyBindings;
+          if ('hotkey' in updates) {
+            nextKeyBindings = assignHotkey(
+              nextKeyBindings,
+              { type: 'pad', id: padId },
+              updates.hotkey ?? '',
+            ).keyBindings;
+          }
+          const updatedPads = state.soundPads.map((pad) =>
             pad.id === padId
               ? {
                   ...pad,
@@ -246,13 +360,32 @@ export const useAppStore = create<AppStoreState>()(
                   id: pad.id,
                 }
               : pad,
-          ),
-        })),
+          );
+          return {
+            soundPads: syncPadsWithKeyBindings(updatedPads, nextKeyBindings),
+            settings: {
+              ...state.settings,
+              keyBindings: nextKeyBindings,
+            },
+          };
+        }),
 
       deleteSoundPad: (padId) =>
-        set((state) => ({
-          soundPads: state.soundPads.filter((pad) => pad.id !== padId),
-        })),
+        set((state) => {
+          const nextPads = state.soundPads.filter((pad) => pad.id !== padId);
+          const nextPadBindings = { ...state.settings.keyBindings.pads };
+          delete nextPadBindings[padId];
+          return {
+            soundPads: nextPads,
+            settings: {
+              ...state.settings,
+              keyBindings: {
+                ...state.settings.keyBindings,
+                pads: nextPadBindings,
+              },
+            },
+          };
+        }),
 
       moveSoundPad: (padId, direction, sameCategoryOnly = false) =>
         set((state) => {
@@ -360,12 +493,27 @@ export const useAppStore = create<AppStoreState>()(
       },
 
       updateSettings: (updates) =>
-        set((state) => ({
-          settings: {
+        set((state) => {
+          const validPadIds = new Set(state.soundPads.map((p) => p.id));
+          const nextKeyBindings = updates.keyBindings
+            ? sanitizeKeyBindings(
+                updates.keyBindings,
+                DEFAULT_KEY_BINDINGS,
+                validPadIds,
+              )
+            : state.settings.keyBindings;
+          const nextSettings: AppSettings = {
             ...state.settings,
             ...updates,
-          },
-        })),
+            keyBindings: nextKeyBindings,
+          };
+          return {
+            settings: nextSettings,
+            soundPads: updates.keyBindings
+              ? syncPadsWithKeyBindings(state.soundPads, nextKeyBindings)
+              : state.soundPads,
+          };
+        }),
 
       updateScriptTemplates: (updates) =>
         set((state) => ({
@@ -378,6 +526,358 @@ export const useAppStore = create<AppStoreState>()(
           },
         })),
 
+      setActionHotkey: (actionId, hotkey) => {
+        const current = get().settings.keyBindings;
+        const { keyBindings, replacedTarget } = assignHotkey(
+          current,
+          { type: 'action', id: actionId },
+          hotkey,
+        );
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            keyBindings,
+          },
+          soundPads: syncPadsWithKeyBindings(state.soundPads, keyBindings),
+        }));
+        return replacedTarget;
+      },
+
+      setPadHotkey: (padId, hotkey) => {
+        const cleanPadId = padId.trim();
+        if (!cleanPadId) {
+          return null;
+        }
+        const current = get().settings.keyBindings;
+        const { keyBindings, replacedTarget } = assignHotkey(
+          current,
+          { type: 'pad', id: cleanPadId },
+          hotkey,
+        );
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            keyBindings,
+          },
+          soundPads: syncPadsWithKeyBindings(state.soundPads, keyBindings),
+        }));
+        return replacedTarget;
+      },
+
+      resetHotkeysToDefault: () =>
+        set((state) => {
+          const nextBindings = cloneKeyBindings(DEFAULT_KEY_BINDINGS);
+          return {
+            settings: {
+              ...state.settings,
+              keyBindings: nextBindings,
+            },
+            soundPads: syncPadsWithKeyBindings(state.soundPads, nextBindings),
+          };
+        }),
+
+      saveTeamToRosterLibrary: (
+        teamId,
+        customName,
+        ageGroupOrClub,
+        existingRosterId,
+      ) => {
+        const state = get();
+        const team = state.teams[teamId];
+        const now = new Date().toISOString();
+        const trimmedCustomName = customName?.trim();
+        const trimmedAge = ageGroupOrClub?.trim();
+        const targetId = existingRosterId?.trim();
+
+        const existing = targetId
+          ? state.savedRosters.find((r) => r.id === targetId)
+          : undefined;
+
+        if (existing) {
+          const updated: SavedRoster = {
+            ...existing,
+            name: trimmedCustomName || existing.name,
+            teamName: team.name,
+            color: team.color,
+            ...(ageGroupOrClub !== undefined
+              ? trimmedAge
+                ? { ageGroupOrClub: trimmedAge }
+                : {}
+              : existing.ageGroupOrClub
+                ? { ageGroupOrClub: existing.ageGroupOrClub }
+                : {}),
+            roster: { ...team.roster },
+            updatedAt: now,
+          };
+          set((prev) => ({
+            savedRosters: prev.savedRosters.map((r) =>
+              r.id === existing.id ? updated : r,
+            ),
+          }));
+          return existing.id;
+        }
+
+        const newId = targetId || generateId('roster');
+        const defaultName = trimmedAge
+          ? `${team.name} (${trimmedAge})`
+          : team.name;
+        const created: SavedRoster = {
+          id: newId,
+          name: trimmedCustomName || defaultName,
+          teamName: team.name,
+          color: team.color,
+          ...(trimmedAge ? { ageGroupOrClub: trimmedAge } : {}),
+          roster: { ...team.roster },
+          updatedAt: now,
+        };
+        set((prev) => ({
+          savedRosters: [...prev.savedRosters, created],
+        }));
+        return newId;
+      },
+
+      loadRosterFromLibrary: (rosterId, targetTeamId) => {
+        const saved = get().savedRosters.find((r) => r.id === rosterId);
+        if (!saved) {
+          return false;
+        }
+        set((state) => ({
+          teams: {
+            ...state.teams,
+            [targetTeamId]: {
+              id: targetTeamId,
+              name: saved.teamName,
+              color: saved.color,
+              roster: { ...saved.roster },
+            },
+          },
+        }));
+        return true;
+      },
+
+      upsertSavedRoster: (rosterInput) => {
+        const state = get();
+        const now = new Date().toISOString();
+        const cleanId = rosterInput.id?.trim();
+        const existingIndex = cleanId
+          ? state.savedRosters.findIndex((r) => r.id === cleanId)
+          : -1;
+        const finalId =
+          existingIndex >= 0 && cleanId ? cleanId : cleanId || generateId('roster');
+
+        const sanitized = sanitizeSavedRoster({
+          ...rosterInput,
+          id: finalId,
+          updatedAt: now,
+        });
+        if (!sanitized) {
+          return finalId;
+        }
+
+        if (existingIndex >= 0) {
+          set((prev) => ({
+            savedRosters: prev.savedRosters.map((r) =>
+              r.id === finalId ? sanitized : r,
+            ),
+          }));
+        } else {
+          set((prev) => ({
+            savedRosters: [...prev.savedRosters, sanitized],
+          }));
+        }
+        return finalId;
+      },
+
+      deleteSavedRoster: (rosterId) =>
+        set((state) => ({
+          savedRosters: state.savedRosters.filter((r) => r.id !== rosterId),
+        })),
+
+      duplicateSavedRoster: (rosterId) => {
+        const state = get();
+        const source = state.savedRosters.find((r) => r.id === rosterId);
+        if (!source) {
+          return null;
+        }
+        const newId = generateId('roster');
+        const copy: SavedRoster = {
+          ...source,
+          id: newId,
+          name: `${source.name} (kopia)`,
+          roster: { ...source.roster },
+          updatedAt: new Date().toISOString(),
+        };
+        set((prev) => {
+          const idx = prev.savedRosters.findIndex((r) => r.id === rosterId);
+          const next = [...prev.savedRosters];
+          if (idx >= 0) {
+            next.splice(idx + 1, 0, copy);
+          } else {
+            next.push(copy);
+          }
+          return { savedRosters: next };
+        });
+        return newId;
+      },
+
+      saveCurrentAsMatchProfile: (
+        name,
+        clubOrAgeGroup,
+        includeTeams = false,
+        existingProfileId,
+      ) => {
+        const state = get();
+        const now = new Date().toISOString();
+        const trimmedName = name.trim();
+        const trimmedClub = clubOrAgeGroup?.trim();
+        const targetId = existingProfileId?.trim();
+        const existing = targetId
+          ? state.matchProfiles.find((p) => p.id === targetId)
+          : undefined;
+
+        const finalId = existing ? existing.id : targetId || generateId('profile');
+        const clonedBindings = cloneKeyBindings(state.settings.keyBindings);
+        const clonedPads = syncPadsWithKeyBindings(
+          cloneSoundPads(state.soundPads),
+          clonedBindings,
+        );
+
+        const nextProfile: MatchProfile = {
+          id: finalId,
+          name: trimmedName || existing?.name || 'Ny Matchprofil',
+          ...(clubOrAgeGroup !== undefined
+            ? trimmedClub
+              ? { clubOrAgeGroup: trimmedClub }
+              : {}
+            : existing?.clubOrAgeGroup
+              ? { clubOrAgeGroup: existing.clubOrAgeGroup }
+              : {}),
+          soundPads: clonedPads,
+          ...(includeTeams ? { teams: cloneTeams(state.teams) } : {}),
+          settings: {
+            duckVolume: state.settings.duckVolume,
+            fadeOutDurationMs: state.settings.fadeOutDurationMs,
+            scriptTemplates: { ...state.settings.scriptTemplates },
+            keyBindings: clonedBindings,
+          },
+          updatedAt: now,
+        };
+
+        set((prev) => ({
+          matchProfiles: existing
+            ? prev.matchProfiles.map((p) =>
+                p.id === existing.id ? nextProfile : p,
+              )
+            : [...prev.matchProfiles, nextProfile],
+          activeProfileId: finalId,
+        }));
+
+        return finalId;
+      },
+
+      activateMatchProfile: (profileId, options) => {
+        const state = get();
+        const profile = state.matchProfiles.find((p) => p.id === profileId);
+        if (!profile) {
+          return false;
+        }
+
+        const rawPads = cloneSoundPads(profile.soundPads);
+        const validPadIds = new Set(rawPads.map((p) => p.id));
+
+        const nextKeyBindings = profile.settings?.keyBindings
+          ? sanitizeKeyBindings(
+              profile.settings.keyBindings,
+              DEFAULT_KEY_BINDINGS,
+              validPadIds,
+            )
+          : sanitizeKeyBindings(
+              state.settings.keyBindings,
+              DEFAULT_KEY_BINDINGS,
+              validPadIds,
+            );
+
+        const nextPads = syncPadsWithKeyBindings(rawPads, nextKeyBindings);
+
+        const nextSettings: AppSettings = {
+          ...state.settings,
+          duckVolume: profile.settings?.duckVolume ?? state.settings.duckVolume,
+          fadeOutDurationMs:
+            profile.settings?.fadeOutDurationMs ??
+            state.settings.fadeOutDurationMs,
+          scriptTemplates: profile.settings?.scriptTemplates
+            ? { ...profile.settings.scriptTemplates }
+            : { ...state.settings.scriptTemplates },
+          keyBindings: nextKeyBindings,
+        };
+
+        const shouldLoadTeams = Boolean(options?.loadTeams && profile.teams);
+
+        set((prev) => ({
+          soundPads: nextPads,
+          settings: nextSettings,
+          teams:
+            shouldLoadTeams && profile.teams
+              ? cloneTeams(profile.teams)
+              : prev.teams,
+          activeProfileId: profile.id,
+        }));
+
+        return true;
+      },
+
+      deleteMatchProfile: (profileId) =>
+        set((state) => ({
+          matchProfiles: state.matchProfiles.filter((p) => p.id !== profileId),
+          activeProfileId:
+            state.activeProfileId === profileId ? null : state.activeProfileId,
+        })),
+
+      duplicateMatchProfile: (profileId) => {
+        const state = get();
+        const source = state.matchProfiles.find((p) => p.id === profileId);
+        if (!source) {
+          return null;
+        }
+        const newId = generateId('profile');
+        const copy: MatchProfile = {
+          ...source,
+          id: newId,
+          name: `${source.name} (kopia)`,
+          soundPads: cloneSoundPads(source.soundPads),
+          ...(source.teams ? { teams: cloneTeams(source.teams) } : {}),
+          ...(source.settings
+            ? {
+                settings: {
+                  ...source.settings,
+                  ...(source.settings.scriptTemplates
+                    ? { scriptTemplates: { ...source.settings.scriptTemplates } }
+                    : {}),
+                  ...(source.settings.keyBindings
+                    ? {
+                        keyBindings: cloneKeyBindings(
+                          source.settings.keyBindings,
+                        ),
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+          updatedAt: new Date().toISOString(),
+        };
+        set((prev) => {
+          const idx = prev.matchProfiles.findIndex((p) => p.id === profileId);
+          const next = [...prev.matchProfiles];
+          if (idx >= 0) {
+            next.splice(idx + 1, 0, copy);
+          } else {
+            next.push(copy);
+          }
+          return { matchProfiles: next };
+        });
+        return newId;
+      },
+
       exportConfigJson: () => {
         const state = get();
         return exportMatchConfig({
@@ -385,6 +885,9 @@ export const useAppStore = create<AppStoreState>()(
           teams: state.teams,
           soundPads: state.soundPads,
           settings: state.settings,
+          savedRosters: state.savedRosters,
+          matchProfiles: state.matchProfiles,
+          activeProfileId: state.activeProfileId,
         });
       },
 
@@ -394,6 +897,9 @@ export const useAppStore = create<AppStoreState>()(
           teams: imported.teams,
           soundPads: imported.soundPads,
           settings: imported.settings,
+          savedRosters: imported.savedRosters ?? [],
+          matchProfiles: imported.matchProfiles ?? [],
+          activeProfileId: imported.activeProfileId ?? null,
         });
         return imported;
       },
@@ -404,6 +910,9 @@ export const useAppStore = create<AppStoreState>()(
           teams: reset.teams,
           soundPads: reset.soundPads,
           settings: reset.settings,
+          savedRosters: reset.savedRosters ?? [],
+          matchProfiles: reset.matchProfiles ?? [],
+          activeProfileId: reset.activeProfileId ?? null,
         });
       },
     }),
@@ -415,6 +924,9 @@ export const useAppStore = create<AppStoreState>()(
         teams: state.teams,
         soundPads: state.soundPads,
         settings: state.settings,
+        savedRosters: state.savedRosters,
+        matchProfiles: state.matchProfiles,
+        activeProfileId: state.activeProfileId,
       }),
       merge: (persistedState, currentState) => {
         const sanitized = sanitizeMatchConfig(persistedState);
@@ -423,6 +935,9 @@ export const useAppStore = create<AppStoreState>()(
           teams: sanitized.teams,
           soundPads: sanitized.soundPads,
           settings: sanitized.settings,
+          savedRosters: sanitized.savedRosters ?? [],
+          matchProfiles: sanitized.matchProfiles ?? [],
+          activeProfileId: sanitized.activeProfileId ?? null,
         };
       },
     },

@@ -1,3 +1,4 @@
+import { DEFAULT_SPOTIFY_CLIENT_ID } from '../data/defaults.ts';
 import type { SpotifyTokenState } from '../types/models.ts';
 import { generatePkceChallenge, generatePkceVerifier } from '../utils/domain.ts';
 
@@ -72,6 +73,91 @@ function removeStorageItem(key: string): void {
   }
 }
 
+function resolveSpotifyClientId(
+  clientIdOverride?: string,
+  stored?: { clientId?: unknown } | null,
+): string {
+  const storedClientId =
+    typeof stored?.clientId === 'string' ? stored.clientId.trim() : '';
+  return (
+    clientIdOverride?.trim() || storedClientId || DEFAULT_SPOTIFY_CLIENT_ID
+  );
+}
+
+function getEffectivePort(protocol: string, port: string): string {
+  if (port) {
+    return port;
+  }
+  if (protocol === 'http:') {
+    return '80';
+  }
+  if (protocol === 'https:') {
+    return '443';
+  }
+  return '';
+}
+
+export function ensureConsistentLoopbackOrigin(redirectUri: string): boolean {
+  if (typeof window === 'undefined' || !window.location) {
+    return false;
+  }
+
+  const trimmedRedirect = redirectUri.trim();
+  if (!trimmedRedirect) {
+    return false;
+  }
+
+  let parsedRedirect: URL;
+  try {
+    parsedRedirect = new URL(trimmedRedirect);
+  } catch {
+    return false;
+  }
+
+  const currentHostname = window.location.hostname;
+  if (currentHostname !== 'localhost' || parsedRedirect.hostname !== '127.0.0.1') {
+    return false;
+  }
+
+  const currentProtocol = window.location.protocol || parsedRedirect.protocol;
+  const currentPort = getEffectivePort(currentProtocol, window.location.port || '');
+  const redirectPort = getEffectivePort(
+    parsedRedirect.protocol,
+    parsedRedirect.port,
+  );
+  if (currentPort !== redirectPort) {
+    return false;
+  }
+
+  let targetHref: string;
+  try {
+    const currentUrl = new URL(window.location.href);
+    currentUrl.hostname = '127.0.0.1';
+    targetHref = currentUrl.toString();
+  } catch {
+    const portSuffix = window.location.port ? `:${window.location.port}` : '';
+    const pathname = window.location.pathname || '/';
+    const search = window.location.search || '';
+    const hash = window.location.hash || '';
+    targetHref = `${currentProtocol}//127.0.0.1${portSuffix}${pathname}${search}${hash}`;
+  }
+
+  try {
+    if (typeof window.location.replace === 'function') {
+      window.location.replace(targetHref);
+      return true;
+    }
+    if (typeof window.location.assign === 'function') {
+      window.location.assign(targetHref);
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
 export function clearProactiveRefreshTimer(): void {
   if (proactiveRefreshTimer !== null) {
     clearTimeout(proactiveRefreshTimer);
@@ -82,6 +168,7 @@ export function clearProactiveRefreshTimer(): void {
 export function scheduleProactiveRefresh(
   auth: StoredSpotifyAuth,
   onRefreshed?: (updated: StoredSpotifyAuth | null) => void,
+  clientIdOverride?: string,
 ): void {
   clearProactiveRefreshTimer();
   if (typeof window === 'undefined' || !auth.refreshToken) {
@@ -90,9 +177,10 @@ export function scheduleProactiveRefresh(
 
   const refreshAheadMs = 120_000;
   const delayMs = Math.max(10_000, auth.expiresAt - Date.now() - refreshAheadMs);
+  const effectiveClientId = resolveSpotifyClientId(clientIdOverride, auth);
 
   proactiveRefreshTimer = setTimeout(() => {
-    void refreshSpotifyToken(auth.clientId).then((updated) => {
+    void refreshSpotifyToken(effectiveClientId).then((updated) => {
       onRefreshed?.(updated);
     });
   }, delayMs);
@@ -119,7 +207,7 @@ export function getStoredSpotifyAuth(): StoredSpotifyAuth | null {
     tokenType:
       typeof parsed.tokenType === 'string' ? parsed.tokenType : 'Bearer',
     scope: typeof parsed.scope === 'string' ? parsed.scope : SPOTIFY_SCOPES,
-    clientId: typeof parsed.clientId === 'string' ? parsed.clientId : '',
+    clientId: resolveSpotifyClientId(undefined, parsed),
   };
 }
 
@@ -175,6 +263,9 @@ export async function startSpotifyLogin(
   if (typeof window === 'undefined') {
     throw new Error('Spotify-inloggning kräver webbläsarmiljö.');
   }
+  if (ensureConsistentLoopbackOrigin(redirectUri)) {
+    return;
+  }
   const url = await buildSpotifyAuthorizeUrl(clientId, redirectUri);
   window.location.assign(url);
 }
@@ -217,7 +308,7 @@ export async function handleSpotifyCallback(
     throw new Error('Ogiltig OAuth state-parameter vid Spotify-callback.');
   }
 
-  const clientId = pending?.clientId || fallbackClientId.trim();
+  const clientId = resolveSpotifyClientId(fallbackClientId, pending);
   const redirectUri = pending?.redirectUri || fallbackRedirectUri.trim();
   const verifier = pending?.verifier || '';
 
@@ -283,8 +374,8 @@ export async function refreshSpotifyToken(
 
   inFlightRefresh = (async () => {
     const existing = getStoredSpotifyAuth();
-    const clientId = clientIdOverride?.trim() || existing?.clientId || '';
-    if (!existing?.refreshToken || !clientId) {
+    const clientId = resolveSpotifyClientId(clientIdOverride, existing);
+    if (!existing?.refreshToken) {
       return null;
     }
 
@@ -327,7 +418,7 @@ export async function refreshSpotifyToken(
       };
 
       writeJsonStorage(SPOTIFY_AUTH_STORAGE_KEY, updated);
-      scheduleProactiveRefresh(updated);
+      scheduleProactiveRefresh(updated, undefined, clientId);
       return updated;
     } catch {
       return null;
@@ -347,12 +438,13 @@ export async function getValidSpotifyAccessToken(
     return null;
   }
 
+  const effectiveClientId = resolveSpotifyClientId(clientIdOverride, stored);
   if (!isTokenExpiringSoon(stored)) {
-    scheduleProactiveRefresh(stored);
+    scheduleProactiveRefresh(stored, undefined, effectiveClientId);
     return stored.accessToken;
   }
 
-  const refreshed = await refreshSpotifyToken(clientIdOverride);
+  const refreshed = await refreshSpotifyToken(effectiveClientId);
   return refreshed ? refreshed.accessToken : null;
 }
 

@@ -11,6 +11,7 @@ import { TopBar } from './components/TopBar.tsx';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.ts';
 import { audioController } from './services/audioController.ts';
 import {
+  ensureConsistentLoopbackOrigin,
   getStoredSpotifyAuth,
   getValidSpotifyAccessToken,
   handleSpotifyCallback,
@@ -66,15 +67,28 @@ export function App() {
     }
 
     setIsSpotifyAuthenticated(true);
-    await spotifyPlayerService.connect(clientId, audioController.getState().volume);
+    const connected = await spotifyPlayerService.connect(
+      clientId,
+      audioController.getState().volume,
+    );
+    if (!connected) {
+      audioController.setSimulatedMode(
+        'Ingen aktiv Spotify-spelare – Simulerat Läge',
+      );
+      setBannerMessage(
+        spotifyPlayerService.getLastError() ||
+          'Ingen aktiv Spotify-spelare hittades. Öppna Spotify-appen på datorn eller mobilen (eller aktivera Widevine DRM i webbläsaren) och klicka på Återanslut Spotify.',
+      );
+    }
   }, []);
 
   useEffect(() => {
     const unsubscribe = audioController.subscribe(setAudioState);
 
     spotifyPlayerService.setCallbacks({
-      onReady: (deviceId) => {
-        audioController.setSpotifyConnected(deviceId);
+      onReady: (deviceId, deviceName) => {
+        audioController.setSpotifyConnected(deviceId, deviceName);
+        setBannerMessage(null);
       },
       onNotReady: () => {
         audioController.setSimulatedMode(
@@ -107,35 +121,38 @@ export function App() {
 
     if (typeof window !== 'undefined' && !oauthHandledRef.current) {
       oauthHandledRef.current = true;
-      const searchParams = new URLSearchParams(window.location.search);
-      const isCallbackPath = window.location.pathname === '/callback';
-      const hasOAuthCode = searchParams.has('code') || searchParams.has('error');
+      const currentSettings = useAppStore.getState().settings;
+      if (!ensureConsistentLoopbackOrigin(currentSettings.spotifyRedirectUri)) {
+        const searchParams = new URLSearchParams(window.location.search);
+        const isCallbackPath = window.location.pathname === '/callback';
+        const hasOAuthCode =
+          searchParams.has('code') || searchParams.has('error');
 
-      if (isCallbackPath || hasOAuthCode) {
-        const currentSettings = useAppStore.getState().settings;
-        void handleSpotifyCallback(
-          searchParams,
-          currentSettings.spotifyClientId,
-          currentSettings.spotifyRedirectUri,
-        )
-          .then(async () => {
-            setIsSpotifyAuthenticated(true);
-            setBannerMessage(
-              'Spotify-inloggning lyckades! Ansluter Hockey DJ Booth...',
-            );
-            window.history.replaceState({}, document.title, '/');
-            await connectSpotifySdk();
-          })
-          .catch((err: unknown) => {
-            const message =
-              err instanceof Error
-                ? err.message
-                : 'Spotify-inloggning misslyckades.';
-            setBannerMessage(message);
-            window.history.replaceState({}, document.title, '/');
-          });
-      } else if (getStoredSpotifyAuth()) {
-        void connectSpotifySdk();
+        if (isCallbackPath || hasOAuthCode) {
+          void handleSpotifyCallback(
+            searchParams,
+            currentSettings.spotifyClientId,
+            currentSettings.spotifyRedirectUri,
+          )
+            .then(async () => {
+              setIsSpotifyAuthenticated(true);
+              setBannerMessage(
+                'Spotify-inloggning lyckades! Ansluter Hockey DJ Booth...',
+              );
+              window.history.replaceState({}, document.title, '/');
+              await connectSpotifySdk();
+            })
+            .catch((err: unknown) => {
+              const message =
+                err instanceof Error
+                  ? err.message
+                  : 'Spotify-inloggning misslyckades.';
+              setBannerMessage(message);
+              window.history.replaceState({}, document.title, '/');
+            });
+        } else if (getStoredSpotifyAuth()) {
+          void connectSpotifySdk();
+        }
       }
     }
 
@@ -319,6 +336,7 @@ export function App() {
           activateMatchProfile(profileId, { loadTeams: false })
         }
         onConnectSpotify={handleConnectSpotify}
+        onReconnectSpotify={() => void connectSpotifySdk()}
         onLogoutSpotify={handleLogoutSpotify}
         onVolumeChange={(vol) => void audioController.setVolumeImmediate(vol)}
         onFadeOut={handleFadeOut}

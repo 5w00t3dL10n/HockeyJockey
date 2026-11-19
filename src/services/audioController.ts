@@ -10,6 +10,8 @@ export const RAMP_INTERVAL_MS = 50;
 export interface AudioTransportAdapter {
   isReady(): boolean;
   getDeviceId(): string | null;
+  getDeviceName?: () => string | null;
+  ensureReady?: () => Promise<boolean>;
   playTrack(trackUri: string, positionMs: number): Promise<void>;
   pause(): Promise<void>;
   setVolume(volume: number): Promise<void>;
@@ -18,6 +20,8 @@ export interface AudioTransportAdapter {
 const defaultSpotifyAdapter: AudioTransportAdapter = {
   isReady: () => spotifyPlayerService.isReady(),
   getDeviceId: () => spotifyPlayerService.getDeviceId(),
+  getDeviceName: () => spotifyPlayerService.getDeviceName(),
+  ensureReady: () => spotifyPlayerService.ensureReady(),
   playTrack: (trackUri, positionMs) =>
     spotifyPlayerService.playTrack(trackUri, positionMs),
   pause: () => spotifyPlayerService.pause(),
@@ -89,12 +93,14 @@ export class AudioController {
     this.emit();
   }
 
-  public setSpotifyConnected(deviceId: string): void {
+  public setSpotifyConnected(deviceId: string, deviceName?: string): void {
     this.stopSimulatedSynth();
+    const resolvedName = deviceName?.trim() || 'Hockey DJ Booth';
     this.updateState({
       mode: 'spotify',
       deviceId,
-      statusMessage: 'Spotify Ansluten (Hockey DJ Booth)',
+      deviceName: resolvedName,
+      statusMessage: `Spotify Ansluten (${resolvedName})`,
       error: null,
     });
   }
@@ -382,6 +388,14 @@ export class AudioController {
       startTimeMs: safePosition,
     };
 
+    if (!this.adapter.isReady() && this.adapter.ensureReady) {
+      try {
+        await this.adapter.ensureReady();
+      } catch {
+        // Calm Tech: ignore ensureReady error and let isReady determine fallback
+      }
+    }
+
     await this.applyTransportVolume(safeVolume);
 
     const canUseSpotify = this.adapter.isReady();
@@ -389,12 +403,19 @@ export class AudioController {
       try {
         await this.adapter.playTrack(trackUri, safePosition);
         this.stopSimulatedSynth();
+        const resolvedName =
+          this.adapter.getDeviceName?.()?.trim() ||
+          this.state.deviceName ||
+          'Hockey DJ Booth';
         this.updateState({
           mode: 'spotify',
           isPlaying: true,
           isDucked: false,
           positionMs: safePosition,
           currentTrack: track,
+          deviceId: this.adapter.getDeviceId(),
+          deviceName: resolvedName,
+          statusMessage: `Spotify Ansluten (${resolvedName})`,
           error: null,
         });
       } catch (err) {

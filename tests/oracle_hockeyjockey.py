@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, AND section 4.2 of 07_oracle_away_goal_and_metadata_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, AND section 4 of 09_oracle_spotify_resilience_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
@@ -13,6 +13,8 @@ Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 
 9. Zustand `useAppStore` full JSON export/import round-trip (`exportConfigJson` -> `importConfigJson`).
 10. Zustand `useAppStore` `awayGoalSilence` default (`true`), MatchProfile switching, and JSON export/import preservation.
 11. Spotify track metadata (`fetchSpotifyTrackMetadata` graceful `null` on invalid URLs & `extractSpotifyTrackId` + `parseSpotifyMetadataPayload` with user example URL).
+12. Self-healing `AudioController.playAt()` via `ensureReady()` and permanent failing adapter fallback to `'simulated'`.
+13. `SpotifyPlayerService.discoverConnectDevice()` & `'connect'` transport (`playTrack` 404->transfer/discovery->204 retry, `pause`, throttled `setVolume`).
 
 Deterministic exit codes:
 - 0: All oracle checks passed.
@@ -1226,6 +1228,434 @@ console.log(JSON.stringify({{
         )
 
 
+def check_audio_controller_self_healing_ensure_ready() -> None:
+    """Oracle 12: Verify self-healing AudioController.playAt() via ensureReady() and permanent failure fallback."""
+    script = """
+import { AudioController } from './src/services/audioController.ts';
+
+// 1. Self-healing adapter: initially not ready, ensureReady() connects Spotify Desktop
+let ready = false;
+let currentDeviceId = null;
+let currentDeviceName = null;
+let ensureReadyCalls = 0;
+const setVolumeCalls = [];
+const playTrackCalls = [];
+let pauseCalls = 0;
+
+const selfHealingAdapter = {
+  isReady: () => ready,
+  getDeviceId: () => currentDeviceId,
+  getDeviceName: () => currentDeviceName,
+  ensureReady: async () => {
+    ensureReadyCalls += 1;
+    ready = true;
+    currentDeviceId = 'connect-dev-1';
+    currentDeviceName = 'Spotify Desktop';
+    return true;
+  },
+  playTrack: async (trackUri, positionMs) => {
+    playTrackCalls.push({ trackUri, positionMs });
+  },
+  pause: async () => {
+    pauseCalls += 1;
+  },
+  setVolume: async (volume) => {
+    setVolumeCalls.push(volume);
+  },
+};
+
+const healingController = new AudioController(selfHealingAdapter);
+await healingController.playAt(
+  'spotify:track:4uLU6hMCjMI75M1A2tKUQC',
+  18000,
+  0.85,
+  undefined,
+  { title: 'Resilience Horn', artist: 'Arena' },
+);
+const healedState = healingController.getState();
+await healingController.hardStop();
+healingController.dispose();
+
+// 2. Permanent failure adapter without ensureReady (not ready) -> simulated fallback
+let unreadyPlayTrackCalled = false;
+const customFailingUnreadyAdapter = {
+  isReady: () => false,
+  getDeviceId: () => null,
+  getDeviceName: () => null,
+  playTrack: async () => {
+    unreadyPlayTrackCalled = true;
+  },
+  pause: async () => {},
+  setVolume: async () => {},
+};
+const unreadyFallbackController = new AudioController(customFailingUnreadyAdapter);
+await unreadyFallbackController.playAt(
+  'spotify:track:4uLU6hMCjMI75M1A2tKUQC',
+  5000,
+  0.9,
+);
+const unreadyFallbackState = unreadyFallbackController.getState();
+await unreadyFallbackController.hardStop();
+unreadyFallbackController.dispose();
+
+// 3. Permanent failure adapter without ensureReady (ready, but playTrack throws) -> simulated fallback
+const customFailingAdapter = {
+  isReady: () => true,
+  getDeviceId: () => 'dead-device-1',
+  playTrack: async () => {
+    throw new Error('Permanent Spotify transport failure');
+  },
+  pause: async () => {},
+  setVolume: async () => {},
+};
+const throwingFallbackController = new AudioController(customFailingAdapter);
+await throwingFallbackController.playAt(
+  'spotify:track:4uLU6hMCjMI75M1A2tKUQC',
+  0,
+  1.0,
+);
+const throwingFallbackState = throwingFallbackController.getState();
+await throwingFallbackController.hardStop();
+throwingFallbackController.dispose();
+
+console.log(JSON.stringify({
+  ensureReadyCalls,
+  setVolumeCalls,
+  playTrackCalls,
+  pauseCalls,
+  healedState,
+  unreadyPlayTrackCalled,
+  unreadyFallbackState,
+  throwingFallbackState,
+}));
+"""
+    res = run_ts_script(script, timeout=30)
+
+    if res["ensureReadyCalls"] != 1:
+        raise AssertionError(
+            f"Expected ensureReady() to be called exactly once, got {res['ensureReadyCalls']}"
+        )
+    if res["setVolumeCalls"] != [0.85]:
+        raise AssertionError(
+            f"Expected setVolume([0.85]) after ensureReady(), got {res['setVolumeCalls']!r}"
+        )
+    expected_play_calls = [
+        {"trackUri": "spotify:track:4uLU6hMCjMI75M1A2tKUQC", "positionMs": 18000}
+    ]
+    if res["playTrackCalls"] != expected_play_calls:
+        raise AssertionError(
+            f"Expected playTrack calls {expected_play_calls!r}, got {res['playTrackCalls']!r}"
+        )
+    if res["pauseCalls"] < 1:
+        raise AssertionError("Expected hardStop() to invoke pause() on healed adapter")
+
+    healed = res["healedState"]
+    if (
+        healed["mode"] != "spotify"
+        or healed["isPlaying"] is not True
+        or healed["deviceId"] != "connect-dev-1"
+        or healed["deviceName"] != "Spotify Desktop"
+        or healed["statusMessage"] != "Spotify Ansluten (Spotify Desktop)"
+        or healed["error"] is not None
+        or healed["positionMs"] < 18000
+    ):
+        raise AssertionError(
+            f"AudioController did not stay in 'spotify' mode after ensureReady(): {healed!r}"
+        )
+
+    if res["unreadyPlayTrackCalled"] is not False:
+        raise AssertionError("playTrack should not be called when adapter lacks ensureReady and isReady() is false")
+    unready_fb = res["unreadyFallbackState"]
+    if unready_fb["mode"] != "simulated" or unready_fb["isPlaying"] is not True:
+        raise AssertionError(
+            f"Expected fallback to 'simulated' for unready adapter without ensureReady: {unready_fb!r}"
+        )
+
+    throwing_fb = res["throwingFallbackState"]
+    if (
+        throwing_fb["mode"] != "simulated"
+        or throwing_fb["isPlaying"] is not True
+        or throwing_fb["error"] != "Permanent Spotify transport failure"
+        or throwing_fb["statusMessage"] != "Simulerat Läge (Spotify fallback)"
+    ):
+        raise AssertionError(
+            f"Expected fallback to 'simulated' for customFailingAdapter: {throwing_fb!r}"
+        )
+
+
+def check_spotify_connect_discovery_and_transport() -> None:
+    """Oracle 13: Verify SpotifyPlayerService.discoverConnectDevice() and 'connect' transport resilience."""
+    script = """
+import {
+  SPOTIFY_AUTH_STORAGE_KEY,
+  SPOTIFY_SCOPES,
+  clearProactiveRefreshTimer,
+  logoutSpotify,
+} from './src/services/spotifyAuth.ts';
+import { SpotifyPlayerService } from './src/services/spotifyPlayer.ts';
+
+const hadOriginalWindow = 'window' in globalThis;
+const originalWindow = globalThis.window;
+const originalFetch = globalThis.fetch;
+
+const storageMap = new Map();
+const mockLocalStorage = {
+  getItem: (key) => (storageMap.has(key) ? storageMap.get(key) : null),
+  setItem: (key, value) => {
+    storageMap.set(key, String(value));
+  },
+  removeItem: (key) => {
+    storageMap.delete(key);
+  },
+  clear: () => {
+    storageMap.clear();
+  },
+  key: (index) => Array.from(storageMap.keys())[index] ?? null,
+  get length() {
+    return storageMap.size;
+  },
+};
+
+globalThis.window = { localStorage: mockLocalStorage };
+mockLocalStorage.setItem(
+  SPOTIFY_AUTH_STORAGE_KEY,
+  JSON.stringify({
+    accessToken: 'oracle-valid-oauth-token',
+    refreshToken: 'oracle-valid-refresh-token',
+    expiresAt: Date.now() + 3600_000,
+    tokenType: 'Bearer',
+    scope: SPOTIFY_SCOPES,
+    clientId: 'oracle-client-id',
+  }),
+);
+
+const fetchLog = [];
+let playPutCount = 0;
+let transferPutCount = 0;
+
+globalThis.fetch = async (url, init = {}) => {
+  const urlStr = String(url);
+  const method = (init.method || 'GET').toUpperCase();
+  const headers = init.headers || {};
+  const authHeader =
+    typeof headers.get === 'function'
+      ? headers.get('Authorization')
+      : headers.Authorization || headers.authorization || null;
+  const bodyText = typeof init.body === 'string' ? init.body : null;
+
+  fetchLog.push({
+    url: urlStr,
+    method,
+    authHeader,
+    body: bodyText ? JSON.parse(bodyText) : null,
+  });
+
+  if (urlStr === 'https://api.spotify.com/v1/me/player/devices' && method === 'GET') {
+    return new Response(
+      JSON.stringify({
+        devices: [
+          {
+            id: 'restricted-speaker-0',
+            name: 'Restricted Speaker',
+            is_active: true,
+            is_restricted: true,
+            type: 'Speaker',
+          },
+          {
+            id: 'inactive-mobile-2',
+            name: 'Mobile Phone',
+            is_active: false,
+            is_restricted: false,
+            type: 'Smartphone',
+          },
+          {
+            id: 'linux-desktop-dev-1',
+            name: 'Linux Desktop',
+            is_active: true,
+            is_restricted: false,
+            type: 'Computer',
+          },
+        ],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
+  if (urlStr.startsWith('https://api.spotify.com/v1/me/player/play') && method === 'PUT') {
+    playPutCount += 1;
+    // 1st & 3rd play attempts return 404 to exercise both transfer-playback and discovery recovery paths
+    if (playPutCount === 1 || playPutCount === 3) {
+      return new Response(
+        JSON.stringify({ error: { status: 404, message: 'Device not found' } }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  if (urlStr === 'https://api.spotify.com/v1/me/player' && method === 'PUT') {
+    transferPutCount += 1;
+    // 1st transfer succeeds (204); 2nd fails (404) so playTrack falls through to discoverConnectDevice()
+    if (transferPutCount === 1) {
+      return new Response(null, { status: 204 });
+    }
+    return new Response(null, { status: 404 });
+  }
+
+  if (urlStr.startsWith('https://api.spotify.com/v1/me/player/pause') && method === 'PUT') {
+    return new Response(null, { status: 204 });
+  }
+
+  if (urlStr.startsWith('https://api.spotify.com/v1/me/player/volume') && method === 'PUT') {
+    return new Response(null, { status: 204 });
+  }
+
+  return new Response('Unexpected URL', { status: 500 });
+};
+
+const service = new SpotifyPlayerService();
+const readyCallbacks = [];
+service.setCallbacks({
+  onReady: (id, name) => readyCallbacks.push({ id, name }),
+});
+
+try {
+  const discovered = await service.discoverConnectDevice('oracle-client-id');
+  const stateAfterDiscover = {
+    transportMode: service.getTransportMode(),
+    deviceId: service.getDeviceId(),
+    deviceName: service.getDeviceName(),
+    isReady: service.isReady(),
+  };
+
+  // Path 1: 404 -> PUT /v1/me/player (204) -> retry play (204)
+  await service.playTrack('spotify:track:4QcBuV31ukMvsvviytKjWx', 32100, 'oracle-client-id');
+
+  // Path 2: 404 -> PUT /v1/me/player (404) -> discoverConnectDevice() -> retry play (204)
+  await service.playTrack('spotify:track:4uLU6hMCjMI75M1A2tKUQC', 15000, 'oracle-client-id');
+
+  // Pause in 'connect' mode
+  await service.pause();
+
+  // Throttled setVolume in 'connect' mode: 4 rapid calls -> 1 leading + 1 trailing after throttle window
+  await service.setVolume(0.8);
+  await service.setVolume(0.55);
+  await service.setVolume(0.35);
+  await service.setVolume(0.2);
+
+  const volumeCallsImmediate = fetchLog.filter((entry) =>
+    entry.url.startsWith('https://api.spotify.com/v1/me/player/volume'),
+  ).length;
+
+  await new Promise((resolve) => setTimeout(resolve, 260));
+
+  const volumeCallsAfterTimer = fetchLog.filter((entry) =>
+    entry.url.startsWith('https://api.spotify.com/v1/me/player/volume'),
+  );
+
+  console.log(JSON.stringify({
+    discovered,
+    stateAfterDiscover,
+    readyCallbacks,
+    volumeCallsImmediate,
+    volumeCallsAfterTimer,
+    fetchLog,
+  }));
+} finally {
+  service.disconnect();
+  logoutSpotify();
+  clearProactiveRefreshTimer();
+  globalThis.fetch = originalFetch;
+  if (hadOriginalWindow) {
+    globalThis.window = originalWindow;
+  } else {
+    delete globalThis.window;
+  }
+}
+"""
+    res = run_ts_script(script, timeout=30)
+
+    expected_device = {"id": "linux-desktop-dev-1", "name": "Linux Desktop"}
+    if res["discovered"] != expected_device:
+        raise AssertionError(
+            f"discoverConnectDevice() selected wrong device: expected {expected_device!r}, got {res['discovered']!r}"
+        )
+
+    state = res["stateAfterDiscover"]
+    if (
+        state["transportMode"] != "connect"
+        or state["deviceId"] != "linux-desktop-dev-1"
+        or state["deviceName"] != "Linux Desktop"
+        or state["isReady"] is not True
+    ):
+        raise AssertionError(f"Unexpected SpotifyPlayerService state after discoverConnectDevice(): {state!r}")
+
+    if expected_device not in res["readyCallbacks"]:
+        raise AssertionError(
+            f"Expected onReady callback with {expected_device!r}, got {res['readyCallbacks']!r}"
+        )
+
+    fetch_log = res["fetchLog"]
+    for entry in fetch_log:
+        if entry["authHeader"] != "Bearer oracle-valid-oauth-token":
+            raise AssertionError(f"Missing/incorrect Bearer token on fetch request: {entry!r}")
+
+    device_requests = [
+        e for e in fetch_log if e["url"] == "https://api.spotify.com/v1/me/player/devices" and e["method"] == "GET"
+    ]
+    if len(device_requests) != 2:
+        raise AssertionError(
+            f"Expected 2 GET /v1/me/player/devices requests (initial + 404 fallback), got {len(device_requests)}"
+        )
+
+    play_requests = [
+        e for e in fetch_log if e["url"].startswith("https://api.spotify.com/v1/me/player/play") and e["method"] == "PUT"
+    ]
+    if len(play_requests) != 4:
+        raise AssertionError(
+            f"Expected 4 PUT /v1/me/player/play requests (two 404s + two 204 retries), got {len(play_requests)}"
+        )
+    if play_requests[0]["url"] != "https://api.spotify.com/v1/me/player/play?device_id=linux-desktop-dev-1":
+        raise AssertionError(f"Unexpected play URL: {play_requests[0]['url']!r}")
+    if play_requests[0]["body"] != {
+        "uris": ["spotify:track:4QcBuV31ukMvsvviytKjWx"],
+        "position_ms": 32100,
+    }:
+        raise AssertionError(f"Unexpected play payload: {play_requests[0]['body']!r}")
+
+    transfer_requests = [
+        e for e in fetch_log if e["url"] == "https://api.spotify.com/v1/me/player" and e["method"] == "PUT"
+    ]
+    if len(transfer_requests) != 2:
+        raise AssertionError(
+            f"Expected 2 PUT /v1/me/player transfer requests on 404 recovery, got {len(transfer_requests)}"
+        )
+    if transfer_requests[0]["body"] != {"device_ids": ["linux-desktop-dev-1"], "play": False}:
+        raise AssertionError(f"Unexpected transfer payload: {transfer_requests[0]['body']!r}")
+
+    pause_requests = [
+        e for e in fetch_log if e["url"].startswith("https://api.spotify.com/v1/me/player/pause") and e["method"] == "PUT"
+    ]
+    if len(pause_requests) != 1 or pause_requests[0]["url"] != "https://api.spotify.com/v1/me/player/pause?device_id=linux-desktop-dev-1":
+        raise AssertionError(f"Expected 1 PUT /v1/me/player/pause for Linux Desktop, got {pause_requests!r}")
+
+    if res["volumeCallsImmediate"] != 1:
+        raise AssertionError(
+            f"Expected exactly 1 immediate leading volume call before throttle timer, got {res['volumeCallsImmediate']}"
+        )
+
+    vol_calls = res["volumeCallsAfterTimer"]
+    expected_vol_urls = [
+        "https://api.spotify.com/v1/me/player/volume?volume_percent=80&device_id=linux-desktop-dev-1",
+        "https://api.spotify.com/v1/me/player/volume?volume_percent=20&device_id=linux-desktop-dev-1",
+    ]
+    actual_vol_urls = [e["url"] for e in vol_calls]
+    if actual_vol_urls != expected_vol_urls:
+        raise AssertionError(
+            f"Throttled Connect setVolume() mismatch: expected {expected_vol_urls!r}, got {actual_vol_urls!r}"
+        )
+
+
 def main() -> int:
     checks = [
         ("1. Production build & dist/ artifacts", check_production_build),
@@ -1239,6 +1669,8 @@ def main() -> int:
         ("9. Store full JSON exportConfigJson -> importConfigJson round-trip", check_store_export_import_roundtrip),
         ("10. Store awayGoalSilence default, MatchProfile switching & JSON round-trip", check_store_away_goal_silence),
         ("11. Spotify track metadata (fetchSpotifyTrackMetadata & example link)", check_spotify_track_metadata),
+        ("12. AudioController.playAt() self-healing ensureReady() & failing adapter fallback", check_audio_controller_self_healing_ensure_ready),
+        ("13. SpotifyPlayerService.discoverConnectDevice() & 'connect' transport resilience", check_spotify_connect_discovery_and_transport),
     ]
 
     for label, fn in checks:

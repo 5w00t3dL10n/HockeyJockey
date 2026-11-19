@@ -1,0 +1,21 @@
+# Antigravity Rules for [Project-Name]
+Role: Sub-Project Lead Developer & QA Worker
+
+## 1. Scope of Authority & Isolation
+- Full Write Access: Du har full skrivbehörighet inuti detta repository (`Projects/[Project-Name]/`) för att implementera kod och tester enligt godkända blueprints.
+- Isolation: Du får ALDRIG navigera uppåt till Master Workspace (`../../`) eller skapa/modifiera filer utanför detta delprojekts rotkatalog.
+- Sacred Truth: Filer i `blueprints/*_init.md` utgör orubblig arkitektur och är strikt READ-ONLY. Om scheman eller API-kontrakt behöver ändras, MÅSTE du stanna och eskalera.
+- Execution Contract: Följ checklistan och faserna i `blueprints/*_task.md` sekventiellt.
+
+## 2. Gate Runner Automation & Tool Verification
+- Deterministisk Verifiering: Förlita dig ALDRIG på manuella ad-hoc terminaltester eller syntetiska mock-skript.
+- Systemgrind: All kod MÅSTE verifieras genom att köra UEF-V2 Gate Runner:
+  ```powershell
+  ..\..\bin\invoke-v2-gate.ps1 -Project "[Project-Name]" -RequiredTools "<verktyg>" -OracleScript "tests/oracle_[modul].py"
+  ```
+- Node Capability Handoff: Om Stage 0 rapporterar saknat verktyg (exit code 2), avbryt omedelbart utan att hallucinera ersättningsskript. Sätt status till `[PARKED_AWAITING_NODE: <verktyg>]`, flytta ritningen till `../../blueprints/pending_hardware/` och avsluta.
+
+## 3. Definition of Done (DoD) & Arkivering
+- Uppgiften är ENDAST slutförd när `invoke-v2-gate.ps1` har returnerat exit code 0 och telemetribeviset bifogats i slutrapporten.
+- Arkivering: Vid godkänd DoD SKA de slutförda ritningarna flyttas från `blueprints/` till `blueprints/archive/`.
+- Git Commit: Committa de färdiga ändringarna och arkiverade ritningarna i detta delprojekts Git-arkiv.

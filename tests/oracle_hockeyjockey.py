@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, AND section 4.2 of 13_oracle_local_audio_files_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, section 4.2 of 13_oracle_local_audio_files_init.md, AND section 4.2 of 15_oracle_embedded_media_archive_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
@@ -20,6 +20,8 @@ Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 
 16. `localAudioStorage` CRUD & playback URL caching (`saveLocalAudioFile`, `getLocalAudioRecord`, `getLocalAudioPlaybackUrl`, `listLocalAudioFiles`, `deleteLocalAudioFile`).
 17. `AudioController.playAt()` with local audio file (`local:audio:...`), volume ramps (`duckVolume`, `restoreVolume`, `fadeOutAndPause`, `hardStop`), and Spotify `setVolume` isolation.
 18. Zustand `useAppStore` full JSON export/import round-trip with local audio tracks (`sourceType: 'local'`, `localFileName`, `mimeType`).
+19. Embedded media archive directory `src/media` existence, audio file filtering, `registerEmbeddedMediaItems`, `syncEmbeddedMediaArchive`, `getLocalAudioPlaybackUrl`, and `getLocalAudioRecord`.
+20. Zustand `useAppStore.importEmbeddedMediaArchive` auto-creation in `'media_archive'` group, idempotency on repeated loads, user-deletion respect, and `resetToDefaults()` isolation.
 
 Deterministic exit codes:
 - 0: All oracle checks passed.
@@ -2739,6 +2741,554 @@ console.log(JSON.stringify({
         raise AssertionError(f"Imported pad-hype-1 missing local WAV track: {imported_hype_pad!r}")
 
 
+def check_embedded_media_archive_dir_and_storage() -> None:
+    """Oracle 19: Verify src/media existence, archive item filtering, registerEmbeddedMediaItems, syncEmbeddedMediaArchive, getLocalAudioPlaybackUrl, and getLocalAudioRecord."""
+    media_dir = PROJECT_ROOT / "src" / "media"
+    if not media_dir.is_dir():
+        raise AssertionError(f"Expected embedded media archive directory at {media_dir}, but it does not exist")
+
+    all_entries = sorted(
+        p.relative_to(media_dir).as_posix()
+        for p in media_dir.rglob("*")
+        if p.is_file()
+    )
+    hidden_entries = [rel for rel in all_entries if any(part.startswith(".") for part in rel.split("/"))]
+    visible_entries = [rel for rel in all_entries if rel not in hidden_entries]
+
+    script = f"""
+import {{
+  buildEmbeddedMediaUri,
+  inferAudioMimeType,
+  isAcceptedAudioFileName,
+  isLocalAudioUri,
+  parseLocalAudioFilename,
+}} from './src/utils/domain.ts';
+import {{
+  getLocalAudioPlaybackUrl,
+  getLocalAudioRecord,
+  registerEmbeddedMediaItems,
+  syncEmbeddedMediaArchive,
+}} from './src/services/localAudioStorage.ts';
+
+const hiddenEntries = {json.dumps(hidden_entries)};
+const visibleEntries = {json.dumps(visible_entries)};
+
+const hiddenAcceptance = hiddenEntries.map((rel) => ({{
+  rel,
+  accepted: isAcceptedAudioFileName(rel.split('/').pop() ?? rel),
+}}));
+
+const visibleInspection = visibleEntries.map((rel) => {{
+  const fileName = rel.split('/').pop() ?? rel;
+  return {{
+    rel,
+    fileName,
+    accepted: isAcceptedAudioFileName(fileName),
+    mimeType: inferAudioMimeType(fileName),
+    uri: buildEmbeddedMediaUri(rel),
+  }};
+}});
+
+const uriMp3 = buildEmbeddedMediaUri('speaker/Kvinna - Intro.mp3');
+const uriWav = buildEmbeddedMediaUri('horns/Arena - Goal Horn.wav');
+const uriFallbackMime = buildEmbeddedMediaUri('chants/Arena Chant.ogg');
+
+registerEmbeddedMediaItems([
+  {{
+    trackUri: uriMp3,
+    fileName: 'Kvinna - Intro.mp3',
+    relativePath: 'speaker/Kvinna - Intro.mp3',
+    title: 'Intro',
+    artist: 'Kvinna',
+    mimeType: 'audio/mpeg',
+    sizeBytes: 123456,
+    streamUrl: '  /api/media-archive/file?path=speaker%2FKvinna%20-%20Intro.mp3  ',
+  }},
+  {{
+    trackUri: uriWav,
+    fileName: 'Arena - Goal Horn.wav',
+    relativePath: 'horns/Arena - Goal Horn.wav',
+    title: 'Goal Horn',
+    artist: 'Arena',
+    mimeType: 'audio/wav',
+    sizeBytes: 65432,
+    streamUrl: '/api/media-archive/file?path=horns%2FArena%20-%20Goal%20Horn.wav',
+  }},
+  {{
+    trackUri: uriFallbackMime,
+    fileName: 'Arena Chant.ogg',
+    relativePath: 'chants/Arena Chant.ogg',
+    title: 'Arena Chant',
+    artist: 'Lokal ljudfil',
+    mimeType: '',
+    streamUrl: '/api/media-archive/file?path=chants%2FArena%20Chant.ogg',
+  }},
+  // Invalid entries that registerEmbeddedMediaItems must safely ignore
+  {{
+    trackUri: 'spotify:track:4uLU6hMCjMI75M1A2tKUQC',
+    fileName: 'bad.mp3',
+    relativePath: 'bad.mp3',
+    title: 'Bad',
+    artist: 'Bad',
+    mimeType: 'audio/mpeg',
+    streamUrl: '/api/media-archive/file?path=bad.mp3',
+  }},
+  {{
+    trackUri: 'local:audio:media-empty-stream-12345',
+    fileName: 'empty-stream.mp3',
+    relativePath: 'empty-stream.mp3',
+    title: 'Empty Stream',
+    artist: 'Bad',
+    mimeType: 'audio/mpeg',
+    streamUrl: '   ',
+  }},
+]);
+
+const urlMp3 = await getLocalAudioPlaybackUrl(uriMp3);
+const urlMp3Trimmed = await getLocalAudioPlaybackUrl(`  ${{uriMp3}}  `);
+const urlWav = await getLocalAudioPlaybackUrl(uriWav);
+const urlFallbackMime = await getLocalAudioPlaybackUrl(uriFallbackMime);
+const urlIgnoredEmptyStream = await getLocalAudioPlaybackUrl('local:audio:media-empty-stream-12345');
+const urlInvalidSpotify = await getLocalAudioPlaybackUrl('spotify:track:4uLU6hMCjMI75M1A2tKUQC');
+const urlUnknownLocal = await getLocalAudioPlaybackUrl('local:audio:media-not-registered-999');
+
+const recMp3 = await getLocalAudioRecord(uriMp3);
+const recWav = await getLocalAudioRecord(uriWav);
+const recFallbackMime = await getLocalAudioRecord(uriFallbackMime);
+const recInvalid = await getLocalAudioRecord('spotify:track:4uLU6hMCjMI75M1A2tKUQC');
+
+// Verify syncEmbeddedMediaArchive() fetches /api/media-archive, normalizes items missing trackUri, and registers streamUrl
+const originalFetch = globalThis.fetch;
+let syncedItems = [];
+let syncedUrl = null;
+let syncedRecord = null;
+try {{
+  globalThis.fetch = async (url) => {{
+    if (String(url) === '/api/media-archive') {{
+      return new Response(
+        JSON.stringify({{
+          archiveDir: 'HockeyJockey/src/media',
+          files: [
+            {{
+              fileName: 'Period_Break.flac',
+              relativePath: 'breaks/Period_Break.flac',
+              sizeBytes: 98765,
+              streamUrl: '/api/media-archive/file?path=breaks%2FPeriod_Break.flac',
+            }},
+            {{
+              fileName: '',
+              streamUrl: '/api/media-archive/file?path=invalid',
+            }},
+          ],
+        }}),
+        {{ status: 200, headers: {{ 'Content-Type': 'application/json' }} }},
+      );
+    }}
+    return new Response('Not Found', {{ status: 404 }});
+  }};
+  syncedItems = await syncEmbeddedMediaArchive();
+  if (syncedItems.length === 1) {{
+    syncedUrl = await getLocalAudioPlaybackUrl(syncedItems[0].trackUri);
+    syncedRecord = await getLocalAudioRecord(syncedItems[0].trackUri);
+  }}
+}} finally {{
+  globalThis.fetch = originalFetch;
+}}
+
+const toRecordInfo = (rec) => {{
+  if (!rec) return null;
+  const byteLen =
+    rec.data instanceof ArrayBuffer
+      ? rec.data.byteLength
+      : ArrayBuffer.isView(rec.data)
+        ? rec.data.byteLength
+        : -1;
+  return {{
+    trackUri: rec.trackUri,
+    fileName: rec.fileName,
+    mimeType: rec.mimeType,
+    sizeBytes: rec.sizeBytes,
+    createdAt: rec.createdAt,
+    dataByteLength: byteLen,
+  }};
+}};
+
+const expectedSyncedUri = buildEmbeddedMediaUri('breaks/Period_Break.flac');
+const expectedParsedFlac = parseLocalAudioFilename('Period_Break.flac');
+
+console.log(JSON.stringify({{
+  hiddenAcceptance,
+  visibleInspection,
+  uriMp3,
+  uriWav,
+  uriFallbackMime,
+  uriMp3Valid: isLocalAudioUri(uriMp3),
+  urlMp3,
+  urlMp3Trimmed,
+  urlWav,
+  urlFallbackMime,
+  urlIgnoredEmptyStream,
+  urlInvalidSpotify,
+  urlUnknownLocal,
+  recMp3: toRecordInfo(recMp3),
+  recWav: toRecordInfo(recWav),
+  recFallbackMime: toRecordInfo(recFallbackMime),
+  recInvalid,
+  syncedItems,
+  syncedUrl,
+  syncedRecord: toRecordInfo(syncedRecord),
+  expectedSyncedUri,
+  expectedParsedFlac,
+}}));
+"""
+    res = run_ts_script(script)
+
+    for entry in res["hiddenAcceptance"]:
+        if entry["accepted"] is not False:
+            raise AssertionError(
+                f"Hidden file in src/media must be rejected by isAcceptedAudioFileName: {entry!r}"
+            )
+
+    accepted_visible = [item for item in res["visibleInspection"] if item["accepted"]]
+    if visible_entries and not accepted_visible:
+        raise AssertionError(
+            f"Expected accepted audio files in src/media when visible entries exist, got: {res['visibleInspection']!r}"
+        )
+    seen_real_uris = [item["uri"] for item in accepted_visible]
+    if len(seen_real_uris) != len(set(seen_real_uris)):
+        raise AssertionError(f"Duplicate embedded URIs generated for src/media files: {seen_real_uris!r}")
+
+    if not res["uriMp3Valid"]:
+        raise AssertionError(f"buildEmbeddedMediaUri produced invalid URI: {res['uriMp3']!r}")
+    if res["urlMp3"] != "/api/media-archive/file?path=speaker%2FKvinna%20-%20Intro.mp3":
+        raise AssertionError(f"Unexpected embedded playback URL for MP3: {res['urlMp3']!r}")
+    if res["urlMp3Trimmed"] != res["urlMp3"]:
+        raise AssertionError(f"Whitespace-trimmed embedded URI did not resolve identically: {res['urlMp3Trimmed']!r}")
+    if res["urlWav"] != "/api/media-archive/file?path=horns%2FArena%20-%20Goal%20Horn.wav":
+        raise AssertionError(f"Unexpected embedded playback URL for WAV: {res['urlWav']!r}")
+    if res["urlFallbackMime"] != "/api/media-archive/file?path=chants%2FArena%20Chant.ogg":
+        raise AssertionError(f"Unexpected embedded playback URL for OGG: {res['urlFallbackMime']!r}")
+
+    for null_key in ("urlIgnoredEmptyStream", "urlInvalidSpotify", "urlUnknownLocal", "recInvalid"):
+        if res[null_key] is not None:
+            raise AssertionError(f"Expected null for {null_key}, got {res[null_key]!r}")
+
+    if res["recMp3"] != {
+        "trackUri": res["uriMp3"],
+        "fileName": "Kvinna - Intro.mp3",
+        "mimeType": "audio/mpeg",
+        "sizeBytes": 123456,
+        "createdAt": "embedded-media-archive",
+        "dataByteLength": 0,
+    }:
+        raise AssertionError(f"Unexpected getLocalAudioRecord for embedded MP3: {res['recMp3']!r}")
+
+    if res["recWav"] != {
+        "trackUri": res["uriWav"],
+        "fileName": "Arena - Goal Horn.wav",
+        "mimeType": "audio/wav",
+        "sizeBytes": 65432,
+        "createdAt": "embedded-media-archive",
+        "dataByteLength": 0,
+    }:
+        raise AssertionError(f"Unexpected getLocalAudioRecord for embedded WAV: {res['recWav']!r}")
+
+    if res["recFallbackMime"] != {
+        "trackUri": res["uriFallbackMime"],
+        "fileName": "Arena Chant.ogg",
+        "mimeType": "audio/ogg",
+        "sizeBytes": 0,
+        "createdAt": "embedded-media-archive",
+        "dataByteLength": 0,
+    }:
+        raise AssertionError(f"Unexpected getLocalAudioRecord MIME/sizeBytes fallback: {res['recFallbackMime']!r}")
+
+    if len(res["syncedItems"]) != 1:
+        raise AssertionError(f"Expected 1 normalized item from syncEmbeddedMediaArchive(), got {res['syncedItems']!r}")
+    synced_item = res["syncedItems"][0]
+    if (
+        synced_item["trackUri"] != res["expectedSyncedUri"]
+        or synced_item["mimeType"] != "audio/flac"
+        or synced_item["title"] != res["expectedParsedFlac"]["title"]
+        or synced_item["artist"] != res["expectedParsedFlac"]["artist"]
+        or synced_item["sizeBytes"] != 98765
+    ):
+        raise AssertionError(f"Unexpected normalized item from syncEmbeddedMediaArchive(): {synced_item!r}")
+    if res["syncedUrl"] != "/api/media-archive/file?path=breaks%2FPeriod_Break.flac":
+        raise AssertionError(f"syncEmbeddedMediaArchive() did not register streamUrl: {res['syncedUrl']!r}")
+    if not res["syncedRecord"] or res["syncedRecord"]["createdAt"] != "embedded-media-archive":
+        raise AssertionError(f"syncEmbeddedMediaArchive() did not register getLocalAudioRecord entry: {res['syncedRecord']!r}")
+
+
+def check_store_embedded_media_archive_idempotency() -> None:
+    """Oracle 20: Verify useAppStore.importEmbeddedMediaArchive auto-creation, idempotency, user deletion respect, and resetToDefaults isolation."""
+    script = """
+import { buildEmbeddedMediaUri } from './src/utils/domain.ts';
+import {
+  getLocalAudioPlaybackUrl,
+  getLocalAudioRecord,
+} from './src/services/localAudioStorage.ts';
+import { useAppStore } from './src/store/useAppStore.ts';
+
+useAppStore.getState().resetToDefaults();
+
+try {
+  const itemA = {
+    trackUri: buildEmbeddedMediaUri('matchva-rd-speaker-kvinna-standard.mp3'),
+    fileName: 'matchva-rd-speaker-kvinna-standard.mp3',
+    relativePath: 'matchva-rd-speaker-kvinna-standard.mp3',
+    title: 'Matchvärd Speaker Kvinna',
+    artist: 'Lokal ljudfil',
+    mimeType: 'audio/mpeg',
+    sizeBytes: 812860,
+    streamUrl: '/api/media-archive/file?path=matchva-rd-speaker-kvinna-standard.mp3',
+  };
+
+  const itemB = {
+    trackUri: buildEmbeddedMediaUri('horns/Arena - Goal Horn.wav'),
+    fileName: 'Arena - Goal Horn.wav',
+    relativePath: 'horns/Arena - Goal Horn.wav',
+    title: 'Goal Horn',
+    artist: 'Arena',
+    mimeType: 'audio/wav',
+    sizeBytes: 120000,
+    streamUrl: '/api/media-archive/file?path=horns%2FArena%20-%20Goal%20Horn.wav',
+  };
+
+  const itemC = {
+    trackUri: buildEmbeddedMediaUri('periods/Period_Start.ogg'),
+    fileName: 'Period_Start.ogg',
+    relativePath: 'periods/Period_Start.ogg',
+    title: 'Period Start',
+    artist: 'Lokal ljudfil',
+    mimeType: 'audio/ogg',
+    sizeBytes: 45000,
+    streamUrl: '/api/media-archive/file?path=periods%2FPeriod_Start.ogg',
+  };
+
+  const invalidItem = {
+    trackUri: 'not-valid',
+    fileName: 'broken.mp3',
+    relativePath: 'broken.mp3',
+    title: 'Broken',
+    artist: 'Bad',
+    mimeType: 'audio/mpeg',
+    streamUrl: '/api/media-archive/file?path=broken.mp3',
+  };
+
+  const baselinePadCount = useAppStore.getState().soundPads.length;
+
+  // 1. First import: creates SoundPads in 'media_archive' group & registers streamUrls
+  const firstResult = useAppStore.getState().importEmbeddedMediaArchive([itemA, itemB, invalidItem]);
+  const stateAfterFirst = useAppStore.getState();
+  const padCountAfterFirst = stateAfterFirst.soundPads.length;
+  const mediaGroupsAfterFirst = stateAfterFirst.settings.soundboardGroups.filter((g) => g.id === 'media_archive');
+  const mediaPadsAfterFirst = stateAfterFirst.soundPads.filter((p) => p.category === 'media_archive');
+  const autoUrisAfterFirst = [...stateAfterFirst.autoImportedMediaUris];
+  const embeddedTracksAfterFirst = [...stateAfterFirst.embeddedMediaTracks];
+  const playbackUrlA = await getLocalAudioPlaybackUrl(itemA.trackUri);
+  const playbackUrlB = await getLocalAudioPlaybackUrl(itemB.trackUri);
+  const recordA = await getLocalAudioRecord(itemA.trackUri);
+
+  // 2. Repeated import with same archive: strictly idempotent (zero duplicates)
+  const secondResult = useAppStore.getState().importEmbeddedMediaArchive([itemA, itemB]);
+  const stateAfterSecond = useAppStore.getState();
+  const padCountAfterSecond = stateAfterSecond.soundPads.length;
+  const mediaGroupsAfterSecond = stateAfterSecond.settings.soundboardGroups.filter((g) => g.id === 'media_archive');
+  const autoUrisAfterSecond = [...stateAfterSecond.autoImportedMediaUris];
+
+  // 3. User deletes pad for itemA and customizes label on pad for itemB
+  const padA = stateAfterSecond.soundPads.find((p) => p.tracks.some((t) => t.trackUri === itemA.trackUri));
+  const padB = stateAfterSecond.soundPads.find((p) => p.tracks.some((t) => t.trackUri === itemB.trackUri));
+  if (padA) {
+    useAppStore.getState().deleteSoundPad(padA.id);
+  }
+  if (padB) {
+    useAppStore.getState().updateSoundPad(padB.id, { label: 'Anpassad Arkivknapp' });
+  }
+  const padCountAfterUserDelete = useAppStore.getState().soundPads.length;
+
+  // 4. Re-import same archive: deleted padA must NOT be re-imported and user label on padB must remain
+  const thirdResult = useAppStore.getState().importEmbeddedMediaArchive([itemA, itemB]);
+  const stateAfterThird = useAppStore.getState();
+  const padCountAfterThird = stateAfterThird.soundPads.length;
+  const padAAfterThird = stateAfterThird.soundPads.find((p) => p.tracks.some((t) => t.trackUri === itemA.trackUri)) ?? null;
+  const padBAfterThird = stateAfterThird.soundPads.find((p) => p.tracks.some((t) => t.trackUri === itemB.trackUri)) ?? null;
+
+  // 5. New file itemC added to archive: only itemC is newly imported; deleted itemA stays deleted
+  const fourthResult = useAppStore.getState().importEmbeddedMediaArchive([itemA, itemB, itemC]);
+  const stateAfterFourth = useAppStore.getState();
+  const padCountAfterFourth = stateAfterFourth.soundPads.length;
+  const padAAfterFourth = stateAfterFourth.soundPads.find((p) => p.tracks.some((t) => t.trackUri === itemA.trackUri)) ?? null;
+  const padBAfterFourth = stateAfterFourth.soundPads.find((p) => p.tracks.some((t) => t.trackUri === itemB.trackUri)) ?? null;
+  const padCAfterFourth = stateAfterFourth.soundPads.find((p) => p.tracks.some((t) => t.trackUri === itemC.trackUri)) ?? null;
+
+  // 6. Reset to defaults clears autoImportedMediaUris & media_archive additions cleanly
+  useAppStore.getState().resetToDefaults();
+  const afterReset = useAppStore.getState();
+  const resetCleanCheck = {
+    padCount: afterReset.soundPads.length,
+    autoImportedMediaUris: [...afterReset.autoImportedMediaUris],
+    hasMediaGroup: afterReset.settings.soundboardGroups.some((g) => g.id === 'media_archive'),
+    hasMediaPads: afterReset.soundPads.some((p) => p.category === 'media_archive'),
+  };
+
+  // 7. Pre-existing pad track matching enriches metadata without creating duplicate media_archive pad
+  useAppStore.getState().addSoundPad({
+    id: 'pad-existing-hype-media',
+    label: 'Befintlig Pepp-knapp',
+    category: 'hype',
+    color: '#059669',
+    tracks: [
+      {
+        trackUri: itemC.trackUri,
+        title: 'Custom Existing Title',
+        artist: 'Arena DJ',
+        startTimeMs: 2500,
+      },
+    ],
+  });
+  const preExistingResult = useAppStore.getState().importEmbeddedMediaArchive([itemC]);
+  const enrichedExistingPad = useAppStore.getState().soundPads.find((p) => p.id === 'pad-existing-hype-media') ?? null;
+  const mediaPadsAfterPreExisting = useAppStore.getState().soundPads.filter((p) => p.category === 'media_archive');
+
+  // 8. Empty archive call clears embeddedMediaTracks safely
+  const emptyResult = useAppStore.getState().importEmbeddedMediaArchive([]);
+  const embeddedAfterEmpty = [...useAppStore.getState().embeddedMediaTracks];
+
+  console.log(JSON.stringify({
+    itemA,
+    itemB,
+    itemC,
+    baselinePadCount,
+    firstResult,
+    padCountAfterFirst,
+    mediaGroupsAfterFirst,
+    mediaPadsAfterFirst,
+    autoUrisAfterFirst,
+    embeddedTracksAfterFirst,
+    playbackUrlA,
+    playbackUrlB,
+    recordACreatedAt: recordA?.createdAt ?? null,
+    secondResult,
+    padCountAfterSecond,
+    mediaGroupsAfterSecond,
+    autoUrisAfterSecond,
+    padCountAfterUserDelete,
+    thirdResult,
+    padCountAfterThird,
+    padAAfterThird,
+    padBAfterThird,
+    fourthResult,
+    padCountAfterFourth,
+    padAAfterFourth,
+    padBAfterFourth,
+    padCAfterFourth,
+    resetCleanCheck,
+    preExistingResult,
+    enrichedExistingPad,
+    mediaPadsAfterPreExisting,
+    emptyResult,
+    embeddedAfterEmpty,
+  }));
+} finally {
+  useAppStore.getState().resetToDefaults();
+  useAppStore.getState().importEmbeddedMediaArchive([]);
+}
+"""
+    res = run_ts_script(script)
+
+    item_a = res["itemA"]
+    item_b = res["itemB"]
+    item_c = res["itemC"]
+    base_count = res["baselinePadCount"]
+
+    if res["firstResult"] != {"totalArchiveCount": 2, "newlyAddedCount": 2}:
+        raise AssertionError(f"Unexpected first importEmbeddedMediaArchive result: {res['firstResult']!r}")
+    if res["padCountAfterFirst"] != base_count + 2:
+        raise AssertionError(
+            f"Expected {base_count + 2} pads after first import, got {res['padCountAfterFirst']}"
+        )
+    if res["mediaGroupsAfterFirst"] != [
+        {"id": "media_archive", "label": "Inbäddat Mediaarkiv", "isBuiltin": False}
+    ]:
+        raise AssertionError(f"Unexpected 'media_archive' group after first import: {res['mediaGroupsAfterFirst']!r}")
+    if len(res["mediaPadsAfterFirst"]) != 2:
+        raise AssertionError(f"Expected 2 pads in 'media_archive' category, got {res['mediaPadsAfterFirst']!r}")
+
+    for pad in res["mediaPadsAfterFirst"]:
+        if not pad["id"].startswith("pad-media-") or pad["category"] != "media_archive":
+            raise AssertionError(f"Invalid auto-created media pad shape: {pad!r}")
+        if len(pad["tracks"]) != 1 or pad["tracks"][0].get("sourceType") != "local":
+            raise AssertionError(f"Auto-created media pad missing local track metadata: {pad!r}")
+
+    if res["autoUrisAfterFirst"] != [item_a["trackUri"], item_b["trackUri"]]:
+        raise AssertionError(f"Unexpected autoImportedMediaUris after first import: {res['autoUrisAfterFirst']!r}")
+    if len(res["embeddedTracksAfterFirst"]) != 2:
+        raise AssertionError(f"Expected 2 embeddedMediaTracks, got {res['embeddedTracksAfterFirst']!r}")
+    if res["playbackUrlA"] != item_a["streamUrl"] or res["playbackUrlB"] != item_b["streamUrl"]:
+        raise AssertionError(
+            f"importEmbeddedMediaArchive did not register streamUrls: A={res['playbackUrlA']!r}, B={res['playbackUrlB']!r}"
+        )
+    if res["recordACreatedAt"] != "embedded-media-archive":
+        raise AssertionError(f"Expected 'embedded-media-archive' record after import, got {res['recordACreatedAt']!r}")
+
+    if res["secondResult"] != {"totalArchiveCount": 2, "newlyAddedCount": 0}:
+        raise AssertionError(f"Second importEmbeddedMediaArchive should add 0 new pads: {res['secondResult']!r}")
+    if res["padCountAfterSecond"] != base_count + 2:
+        raise AssertionError(f"Second import duplicated pads: count={res['padCountAfterSecond']}")
+    if len(res["mediaGroupsAfterSecond"]) != 1:
+        raise AssertionError(f"Second import duplicated 'media_archive' group: {res['mediaGroupsAfterSecond']!r}")
+    if res["autoUrisAfterSecond"] != [item_a["trackUri"], item_b["trackUri"]]:
+        raise AssertionError(f"Second import mutated autoImportedMediaUris: {res['autoUrisAfterSecond']!r}")
+
+    if res["padCountAfterUserDelete"] != base_count + 1:
+        raise AssertionError(f"deleteSoundPad did not remove padA: count={res['padCountAfterUserDelete']}")
+    if res["thirdResult"] != {"totalArchiveCount": 2, "newlyAddedCount": 0}:
+        raise AssertionError(f"Third import after user deletion should add 0 pads: {res['thirdResult']!r}")
+    if res["padCountAfterThird"] != base_count + 1 or res["padAAfterThird"] is not None:
+        raise AssertionError(f"Deleted media padA was re-imported on third load: padA={res['padAAfterThird']!r}")
+    if not res["padBAfterThird"] or res["padBAfterThird"]["label"] != "Anpassad Arkivknapp":
+        raise AssertionError(f"User edit on padB was overwritten on third load: {res['padBAfterThird']!r}")
+
+    if res["fourthResult"] != {"totalArchiveCount": 3, "newlyAddedCount": 1}:
+        raise AssertionError(f"Fourth import with new itemC expected newlyAddedCount=1, got {res['fourthResult']!r}")
+    if res["padCountAfterFourth"] != base_count + 2 or res["padAAfterFourth"] is not None:
+        raise AssertionError(f"Fourth import count mismatch or re-imported deleted padA: count={res['padCountAfterFourth']}")
+    if not res["padBAfterFourth"] or res["padBAfterFourth"]["label"] != "Anpassad Arkivknapp":
+        raise AssertionError(f"Fourth import overwrote user label on padB: {res['padBAfterFourth']!r}")
+    if (
+        not res["padCAfterFourth"]
+        or res["padCAfterFourth"]["category"] != "media_archive"
+        or res["padCAfterFourth"]["tracks"][0]["trackUri"] != item_c["trackUri"]
+    ):
+        raise AssertionError(f"Fourth import did not create pad for new itemC: {res['padCAfterFourth']!r}")
+
+    reset_chk = res["resetCleanCheck"]
+    if (
+        reset_chk["padCount"] != base_count
+        or reset_chk["autoImportedMediaUris"] != []
+        or reset_chk["hasMediaGroup"] is not False
+        or reset_chk["hasMediaPads"] is not False
+    ):
+        raise AssertionError(f"resetToDefaults() did not cleanly isolate embedded media archive state: {reset_chk!r}")
+
+    if res["preExistingResult"] != {"totalArchiveCount": 1, "newlyAddedCount": 0}:
+        raise AssertionError(f"Expected newlyAddedCount=0 for pre-existing pad track, got {res['preExistingResult']!r}")
+    if res["mediaPadsAfterPreExisting"]:
+        raise AssertionError(f"Should not create duplicate media_archive pad when track already exists on pad: {res['mediaPadsAfterPreExisting']!r}")
+    enriched_track = (res["enrichedExistingPad"] or {}).get("tracks", [{}])[0]
+    if (
+        enriched_track.get("sourceType") != "local"
+        or enriched_track.get("localFileName") != "Period_Start.ogg"
+        or enriched_track.get("mimeType") != "audio/ogg"
+    ):
+        raise AssertionError(f"Pre-existing pad track was not enriched with local metadata: {enriched_track!r}")
+
+    if res["emptyResult"] != {"totalArchiveCount": 0, "newlyAddedCount": 0} or res["embeddedAfterEmpty"] != []:
+        raise AssertionError(f"Empty importEmbeddedMediaArchive([]) behavior mismatch: {res['emptyResult']!r}, {res['embeddedAfterEmpty']!r}")
+
+
 def main() -> int:
     checks = [
         ("1. Production build & dist/ artifacts", check_production_build),
@@ -2759,6 +3309,8 @@ def main() -> int:
         ("16. localAudioStorage CRUD, MIME inference & playback URL caching", check_local_audio_storage),
         ("17. AudioController.playAt() with local audio, volume ramps & Spotify setVolume isolation", check_audio_controller_local_audio_and_ramps),
         ("18. Store full JSON export/import round-trip with local audio tracks", check_store_local_audio_json_roundtrip),
+        ("19. Embedded media archive dir src/media, filtering & localAudioStorage streamUrl resolution", check_embedded_media_archive_dir_and_storage),
+        ("20. Store importEmbeddedMediaArchive auto-pads in 'media_archive', idempotency & deletion respect", check_store_embedded_media_archive_idempotency),
     ]
 
     for label, fn in checks:

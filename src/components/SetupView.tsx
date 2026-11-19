@@ -31,6 +31,8 @@ import {
 import {
   getLocalAudioRecord,
   saveLocalAudioFile,
+  syncEmbeddedMediaArchive,
+  type EmbeddedMediaItem,
 } from '../services/localAudioStorage.ts';
 import { fetchSpotifyTrackMetadata } from '../services/spotifyMetadata.ts';
 import { useAppStore } from '../store/useAppStore.ts';
@@ -983,6 +985,7 @@ function TrackCueRow({
   onPreview,
 }: TrackCueRowProps) {
   const spotifyClientId = useAppStore((s) => s.settings.spotifyClientId);
+  const embeddedMediaTracks = useAppStore((s) => s.embeddedMediaTracks);
 
   const [uriInput, setUriInput] = useState(track.trackUri);
   const [uriError, setUriError] = useState<string | null>(null);
@@ -1041,7 +1044,7 @@ function TrackCueRow({
     return () => {
       cancelled = true;
     };
-  }, [isLocalTrack, track.trackUri]);
+  }, [isLocalTrack, track.trackUri, embeddedMediaTracks]);
 
   const runMetadataLookup = async (rawInput: string, force: boolean) => {
     if (isLocalAudioUri(rawInput)) {
@@ -1153,6 +1156,34 @@ function TrackCueRow({
     }
   };
 
+  const handleSelectEmbeddedMedia = (selectedUri: string) => {
+    const item = embeddedMediaTracks.find(
+      (entry) => entry.trackUri === selectedUri,
+    );
+    if (!item) {
+      return;
+    }
+    lastEmittedUriRef.current = item.trackUri;
+    setUriInput(item.trackUri);
+    setUriError(null);
+    latestTrackIdRef.current = null;
+    lastAutoFetchedIdRef.current = null;
+    fetchSeqRef.current += 1;
+    setLocalFileMissing(false);
+    onUpdate({
+      trackUri: item.trackUri,
+      sourceType: 'local',
+      localFileName: item.fileName,
+      mimeType: item.mimeType,
+      title: item.title,
+      artist: item.artist,
+    });
+    setMetaStatus({
+      state: 'success',
+      message: `Valde arkivfil: ${item.relativePath}`,
+    });
+  };
+
   const handleUriChange = (raw: string) => {
     setUriInput(raw);
     const parsed = tryParseSpotifyUri(raw);
@@ -1203,7 +1234,7 @@ function TrackCueRow({
       <input
         ref={fileInputRef}
         type="file"
-        accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac,.webm"
+        accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac,.webm,.opus"
         onChange={(e) => void handleLocalFileSelected(e)}
         className="hidden"
       />
@@ -1330,6 +1361,25 @@ function TrackCueRow({
             <FileAudio className="h-3.5 w-3.5" />
             Välj lokal ljudfil...
           </button>
+          {embeddedMediaTracks.length > 0 && (
+            <select
+              aria-label={`Välj från src/media för ${track.title || 'spår'}`}
+              value=""
+              onChange={(e) => {
+                if (e.target.value) {
+                  handleSelectEmbeddedMedia(e.target.value);
+                }
+              }}
+              className="rounded-lg border border-cyan-500/40 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-cyan-200 focus:border-cyan-400 focus:outline-none cursor-pointer"
+            >
+              <option value="">Välj från src/media...</option>
+              {embeddedMediaTracks.map((item) => (
+                <option key={item.trackUri} value={item.trackUri}>
+                  {item.title} ({item.relativePath})
+                </option>
+              ))}
+            </select>
+          )}
           {!isLocalTrack && (
             <button
               type="button"
@@ -1712,6 +1762,237 @@ function SoundboardGroupsSection() {
   );
 }
 
+function formatBytesShort(bytes?: number): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) {
+    return '';
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function EmbeddedMediaArchiveSection({
+  onPreviewTrack,
+}: {
+  onPreviewTrack: (track: TrackCue, volume: number) => void;
+}) {
+  const embeddedMediaTracks = useAppStore((s) => s.embeddedMediaTracks);
+  const soundPads = useAppStore((s) => s.soundPads);
+  const importEmbeddedMediaArchive = useAppStore(
+    (s) => s.importEmbeddedMediaArchive,
+  );
+  const addSoundboardGroup = useAppStore((s) => s.addSoundboardGroup);
+  const addSoundPad = useAppStore((s) => s.addSoundPad);
+
+  const [isScanning, setIsScanning] = useState(false);
+  const [archiveFeedback, setArchiveFeedback] = useState<string | null>(null);
+
+  const handleRescan = async () => {
+    setIsScanning(true);
+    try {
+      const items = await syncEmbeddedMediaArchive();
+      const result = importEmbeddedMediaArchive(items);
+      if (result.totalArchiveCount === 0) {
+        setArchiveFeedback(
+          'Skannade HockeyJockey/src/media: inga accepterade ljudfiler hittades.',
+        );
+      } else if (result.newlyAddedCount > 0) {
+        setArchiveFeedback(
+          `Skannade HockeyJockey/src/media: ${result.totalArchiveCount} ${
+            result.totalArchiveCount === 1 ? 'ljudfil' : 'ljudfiler'
+          } inlästa (${result.newlyAddedCount} ny${
+            result.newlyAddedCount === 1 ? '' : 'a'
+          } soundboard-knapp${
+            result.newlyAddedCount === 1 ? '' : 'ar'
+          } skapades).`,
+        );
+      } else {
+        setArchiveFeedback(
+          `Skannade HockeyJockey/src/media: ${result.totalArchiveCount} ${
+            result.totalArchiveCount === 1 ? 'ljudfil' : 'ljudfiler'
+          } inlästa.`,
+        );
+      }
+    } catch {
+      setArchiveFeedback('Kunde inte skanna HockeyJockey/src/media.');
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleCreatePadFromItem = (item: EmbeddedMediaItem) => {
+    addSoundboardGroup('Inbäddat Mediaarkiv', 'media_archive');
+    const padLabel = item.title || item.fileName;
+    addSoundPad({
+      label: padLabel,
+      category: 'media_archive',
+      color: '#0891b2',
+      volume: 1.0,
+      triggerFlow: null,
+      tracks: [
+        {
+          trackUri: item.trackUri,
+          title: padLabel,
+          artist: item.artist ?? '',
+          startTimeMs: 0,
+          sourceType: 'local',
+          localFileName: item.fileName,
+          mimeType: item.mimeType,
+        },
+      ],
+    });
+    setArchiveFeedback(
+      `Skapade soundboard-knappen "${padLabel}" i gruppen "Inbäddat Mediaarkiv".`,
+    );
+  };
+
+  return (
+    <section
+      aria-labelledby="embedded-media-archive-heading"
+      className="rounded-2xl border border-cyan-500/30 bg-slate-900 p-5 space-y-4"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3
+            id="embedded-media-archive-heading"
+            className="text-sm font-bold uppercase tracking-wider text-cyan-200 flex items-center gap-2"
+          >
+            <FileAudio className="h-4 w-4 text-cyan-400" />
+            <span>
+              Inbäddat Mediaarkiv (<code>HockeyJockey/src/media</code>)
+            </span>
+          </h3>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Ljudfiler som placeras i{' '}
+            <code className="text-slate-300">HockeyJockey/src/media</code> läses
+            in automatiskt vid start och kan provspelas eller läggas på
+            valfria soundboard-knappar.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="rounded-full border border-cyan-500/30 bg-cyan-950/60 px-3 py-1 text-xs font-bold text-cyan-200">
+            {embeddedMediaTracks.length}{' '}
+            {embeddedMediaTracks.length === 1 ? 'ljudfil' : 'ljudfiler'}
+          </span>
+          <button
+            type="button"
+            disabled={isScanning}
+            onClick={() => void handleRescan()}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-cyan-500/40 bg-cyan-950/60 px-3.5 py-2 text-xs font-bold text-cyan-100 hover:bg-cyan-900/60 disabled:opacity-50 cursor-pointer"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${isScanning ? 'animate-spin' : ''}`}
+            />
+            Skanna om src/media nu
+          </button>
+        </div>
+      </div>
+
+      {archiveFeedback && (
+        <div className="flex items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/40 px-3.5 py-2 text-xs font-semibold text-emerald-300">
+          <span>{archiveFeedback}</span>
+          <button
+            type="button"
+            onClick={() => setArchiveFeedback(null)}
+            className="text-emerald-200 hover:underline cursor-pointer"
+          >
+            Stäng
+          </button>
+        </div>
+      )}
+
+      {embeddedMediaTracks.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/70 p-4 text-xs text-slate-400">
+          Inga ljudfiler hittades i{' '}
+          <code className="text-slate-300">HockeyJockey/src/media</code>. Lägg
+          till <code className="text-slate-300">.mp3</code>,{' '}
+          <code className="text-slate-300">.wav</code>,{' '}
+          <code className="text-slate-300">.ogg</code>,{' '}
+          <code className="text-slate-300">.m4a</code>,{' '}
+          <code className="text-slate-300">.flac</code>,{' '}
+          <code className="text-slate-300">.aac</code>,{' '}
+          <code className="text-slate-300">.webm</code> eller{' '}
+          <code className="text-slate-300">.opus</code> i mappen och klicka{' '}
+          <strong>Skanna om src/media nu</strong>.
+        </div>
+      ) : (
+        <div className="divide-y divide-slate-800/80 rounded-xl border border-slate-800 bg-slate-950/90">
+          {embeddedMediaTracks.map((item) => {
+            const isLinkedToPad = soundPads.some((pad) =>
+              pad.tracks.some((t) => t.trackUri === item.trackUri),
+            );
+            const sizeText = formatBytesShort(item.sizeBytes);
+            return (
+              <div
+                key={item.trackUri}
+                className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+              >
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-bold text-white">
+                      {item.title}
+                    </span>
+                    {isLinkedToPad && (
+                      <span className="rounded-full bg-emerald-950/70 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-300">
+                        På Soundboard
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                    <span className="font-mono text-cyan-300/90">
+                      {item.relativePath}
+                    </span>
+                    {item.artist && (
+                      <span>• {item.artist}</span>
+                    )}
+                    {sizeText && <span>• {sizeText}</span>}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onPreviewTrack(
+                        {
+                          trackUri: item.trackUri,
+                          title: item.title,
+                          artist: item.artist,
+                          startTimeMs: 0,
+                          sourceType: 'local',
+                          localFileName: item.fileName,
+                          mimeType: item.mimeType,
+                        },
+                        1.0,
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-700/30 px-3 py-1.5 text-xs font-bold text-emerald-200 hover:bg-emerald-700/50 cursor-pointer"
+                  >
+                    <Play className="h-3.5 w-3.5 fill-current" />
+                    PROVSPELA 5 SEK
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleCreatePadFromItem(item)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-700/30 px-3 py-1.5 text-xs font-bold text-cyan-100 hover:bg-cyan-700/50 cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" />+ Skapa Soundboard-knapp
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 interface SoundPadEditorProps {
   pad: SoundPad;
   index: number;
@@ -1739,6 +2020,7 @@ function SoundPadEditor({
   const spotifyClientId = useAppStore((s) => s.settings.spotifyClientId);
   const soundboardGroups = useAppStore((s) => s.settings.soundboardGroups);
   const addSoundboardGroup = useAppStore((s) => s.addSoundboardGroup);
+  const embeddedMediaTracks = useAppStore((s) => s.embeddedMediaTracks);
 
   const [newUrl, setNewUrl] = useState('');
   const [newTitle, setNewTitle] = useState('');
@@ -2135,7 +2417,7 @@ function SoundPadEditor({
             ref={addFileInputRef}
             type="file"
             multiple
-            accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac,.webm"
+            accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac,.webm,.opus"
             onChange={(e) => void handleNewLocalFilesSelected(e)}
             className="hidden"
           />
@@ -2143,15 +2425,60 @@ function SoundPadEditor({
             <div className="text-xs font-bold text-slate-300">
               + Lägg till låt i poolen
             </div>
-            <button
-              type="button"
-              disabled={isSavingLocalFiles}
-              onClick={() => addFileInputRef.current?.click()}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/50 px-3 py-1.5 text-xs font-bold text-cyan-200 hover:bg-cyan-900/60 disabled:opacity-40 cursor-pointer"
-            >
-              <FileAudio className="h-3.5 w-3.5" />
-              Välj lokal ljudfil...
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {embeddedMediaTracks.length > 0 && (
+                <select
+                  aria-label={`Välj från src/media till ${pad.label}`}
+                  value=""
+                  onChange={(e) => {
+                    const selectedUri = e.target.value;
+                    if (!selectedUri) {
+                      return;
+                    }
+                    const item = embeddedMediaTracks.find(
+                      (entry) => entry.trackUri === selectedUri,
+                    );
+                    if (!item) {
+                      return;
+                    }
+                    const startTimeMs = isValidMmSs(newMmSs)
+                      ? parseTimeMmSsToMs(newMmSs)
+                      : 0;
+                    addTrackToPad(pad.id, {
+                      trackUri: item.trackUri,
+                      title: item.title,
+                      artist: item.artist,
+                      startTimeMs,
+                      sourceType: 'local',
+                      localFileName: item.fileName,
+                      mimeType: item.mimeType,
+                    });
+                    setFormError(null);
+                    setMetaStatus({
+                      state: 'success',
+                      message: `Lade till "${item.title}" från src/media i poolen.`,
+                    });
+                  }}
+                  className="rounded-lg border border-cyan-500/40 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-cyan-200 focus:border-cyan-400 focus:outline-none cursor-pointer"
+                >
+                  <option value="">Välj från src/media...</option>
+                  {embeddedMediaTracks.map((item) => (
+                    <option key={item.trackUri} value={item.trackUri}>
+                      {item.title} ({item.relativePath})
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                disabled={isSavingLocalFiles}
+                onClick={() => addFileInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/50 px-3 py-1.5 text-xs font-bold text-cyan-200 hover:bg-cyan-900/60 disabled:opacity-40 cursor-pointer"
+              >
+                <FileAudio className="h-3.5 w-3.5" />
+                Välj lokal ljudfil...
+              </button>
+            </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-[1.8fr_1fr_1fr_100px] gap-2">
             <div className="flex items-center gap-1.5">
@@ -2589,6 +2916,9 @@ export function SetupView({ onPreviewTrack, onStopAudio }: SetupViewProps) {
       {/* TAB 3: SOUNDBOARD CONFIG */}
       {activeTab === 'soundboard' && (
         <div className="space-y-6">
+          {/* Embedded Media Archive */}
+          <EmbeddedMediaArchiveSection onPreviewTrack={onPreviewTrack} />
+
           {/* Soundboard Groups Manager */}
           <SoundboardGroupsSection />
 

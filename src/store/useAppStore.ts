@@ -23,9 +23,14 @@ import type {
   TrackCue,
 } from '../types/models.ts';
 import {
+  registerEmbeddedMediaItems,
+  type EmbeddedMediaItem,
+} from '../services/localAudioStorage.ts';
+import {
   assignHotkey,
   exportMatchConfig,
   importMatchConfig,
+  isLocalAudioUri,
   parseRosterText,
   sanitizeKeyBindings,
   sanitizeMatchConfig,
@@ -157,6 +162,8 @@ export interface AppStoreState {
   savedRosters: SavedRoster[];
   matchProfiles: MatchProfile[];
   activeProfileId: string | null;
+  embeddedMediaTracks: EmbeddedMediaItem[];
+  autoImportedMediaUris: string[];
 
   updateTeamInfo: (
     teamId: 'home' | 'away',
@@ -238,6 +245,11 @@ export interface AppStoreState {
   deleteMatchProfile: (profileId: string) => void;
   duplicateMatchProfile: (profileId: string) => string | null;
 
+  importEmbeddedMediaArchive: (items: EmbeddedMediaItem[]) => {
+    totalArchiveCount: number;
+    newlyAddedCount: number;
+  };
+
   exportConfigJson: () => string;
   importConfigJson: (jsonString: string) => MatchConfigSnapshot;
   resetToDefaults: () => void;
@@ -254,6 +266,8 @@ export const useAppStore = create<AppStoreState>()(
       savedRosters: initial.savedRosters ?? [],
       matchProfiles: initial.matchProfiles ?? [],
       activeProfileId: initial.activeProfileId ?? null,
+      embeddedMediaTracks: [],
+      autoImportedMediaUris: [],
 
       updateTeamInfo: (teamId, updates) =>
         set((state) => ({
@@ -1081,6 +1095,164 @@ export const useAppStore = create<AppStoreState>()(
         return newId;
       },
 
+      importEmbeddedMediaArchive: (items) => {
+        const safeItems = Array.isArray(items)
+          ? items
+              .filter(
+                (item): item is EmbeddedMediaItem =>
+                  Boolean(item) &&
+                  typeof item.trackUri === 'string' &&
+                  isLocalAudioUri(item.trackUri) &&
+                  typeof item.fileName === 'string' &&
+                  Boolean(item.fileName.trim()) &&
+                  typeof item.streamUrl === 'string' &&
+                  Boolean(item.streamUrl.trim()),
+              )
+              .map((item) => ({ ...item }))
+          : [];
+
+        if (safeItems.length > 0) {
+          registerEmbeddedMediaItems(safeItems);
+        }
+
+        if (safeItems.length === 0) {
+          set({ embeddedMediaTracks: [] });
+          return { totalArchiveCount: 0, newlyAddedCount: 0 };
+        }
+
+        let newlyAddedCount = 0;
+
+        set((state) => {
+          const itemByUri = new Map<string, EmbeddedMediaItem>();
+          const itemByFileName = new Map<string, EmbeddedMediaItem>();
+          for (const item of safeItems) {
+            itemByUri.set(item.trackUri, item);
+            if (!itemByFileName.has(item.fileName)) {
+              itemByFileName.set(item.fileName, item);
+            }
+          }
+
+          const nextPads = state.soundPads.map((pad) => {
+            let tracksChanged = false;
+            const updatedTracks = pad.tracks.map((track) => {
+              const matched =
+                itemByUri.get(track.trackUri) ??
+                (track.localFileName
+                  ? itemByFileName.get(track.localFileName)
+                  : undefined);
+              if (!matched) {
+                return track;
+              }
+              if (
+                track.sourceType === 'local' &&
+                track.localFileName === matched.fileName &&
+                track.mimeType === matched.mimeType
+              ) {
+                return track;
+              }
+              tracksChanged = true;
+              return {
+                ...track,
+                sourceType: 'local' as const,
+                localFileName: matched.fileName,
+                mimeType: matched.mimeType,
+              };
+            });
+            return tracksChanged ? { ...pad, tracks: updatedTracks } : pad;
+          });
+
+          const autoImportedSet = new Set(state.autoImportedMediaUris);
+          const existingPadTrackUris = new Set<string>();
+          const usedPadIds = new Set<string>();
+          for (const pad of nextPads) {
+            usedPadIds.add(pad.id);
+            for (const track of pad.tracks) {
+              existingPadTrackUris.add(track.trackUri);
+            }
+          }
+
+          const addedPads: SoundPad[] = [];
+          const nextAutoImportedUris = [...state.autoImportedMediaUris];
+
+          for (const item of safeItems) {
+            if (
+              autoImportedSet.has(item.trackUri) ||
+              existingPadTrackUris.has(item.trackUri)
+            ) {
+              continue;
+            }
+
+            const uriSuffix = item.trackUri.startsWith('local:audio:')
+              ? item.trackUri.slice('local:audio:'.length)
+              : createGroupSlug(item.relativePath || item.fileName);
+            let padId = `pad-media-${uriSuffix}`;
+            while (usedPadIds.has(padId)) {
+              padId = `pad-media-${uriSuffix}-${Math.random().toString(36).slice(2, 6)}`;
+            }
+            usedPadIds.add(padId);
+
+            addedPads.push({
+              id: padId,
+              label: item.title || item.fileName,
+              category: 'media_archive',
+              color: '#0891b2',
+              volume: 1.0,
+              triggerFlow: null,
+              tracks: [
+                {
+                  trackUri: item.trackUri,
+                  title: item.title || item.fileName,
+                  artist: item.artist ?? '',
+                  startTimeMs: 0,
+                  sourceType: 'local',
+                  localFileName: item.fileName,
+                  mimeType: item.mimeType,
+                },
+              ],
+            });
+
+            autoImportedSet.add(item.trackUri);
+            nextAutoImportedUris.push(item.trackUri);
+            existingPadTrackUris.add(item.trackUri);
+            newlyAddedCount += 1;
+          }
+
+          let nextGroups = state.settings.soundboardGroups;
+          if (
+            newlyAddedCount > 0 &&
+            !nextGroups.some((group) => group.id === 'media_archive')
+          ) {
+            nextGroups = [
+              ...nextGroups,
+              {
+                id: 'media_archive',
+                label: 'Inbäddat Mediaarkiv',
+                isBuiltin: false,
+              },
+            ];
+          }
+
+          return {
+            embeddedMediaTracks: safeItems,
+            autoImportedMediaUris: nextAutoImportedUris,
+            soundPads:
+              addedPads.length > 0 ? [...nextPads, ...addedPads] : nextPads,
+            settings:
+              nextGroups !== state.settings.soundboardGroups
+                ? {
+                    ...state.settings,
+                    soundboardGroups: nextGroups,
+                  }
+                : state.settings,
+          };
+        });
+
+        return {
+          totalArchiveCount: safeItems.length,
+          newlyAddedCount,
+        };
+      },
+
       exportConfigJson: () => {
         const state = get();
         return exportMatchConfig({
@@ -1116,6 +1288,7 @@ export const useAppStore = create<AppStoreState>()(
           savedRosters: reset.savedRosters ?? [],
           matchProfiles: reset.matchProfiles ?? [],
           activeProfileId: reset.activeProfileId ?? null,
+          autoImportedMediaUris: [],
         });
       },
     }),
@@ -1130,9 +1303,24 @@ export const useAppStore = create<AppStoreState>()(
         savedRosters: state.savedRosters,
         matchProfiles: state.matchProfiles,
         activeProfileId: state.activeProfileId,
+        autoImportedMediaUris: state.autoImportedMediaUris,
       }),
       merge: (persistedState, currentState) => {
         const sanitized = sanitizeMatchConfig(persistedState);
+        const rawPersisted =
+          typeof persistedState === 'object' && persistedState !== null
+            ? (persistedState as Record<string, unknown>)
+            : {};
+        const rawAutoUris = Array.isArray(rawPersisted.autoImportedMediaUris)
+          ? Array.from(
+              new Set(
+                rawPersisted.autoImportedMediaUris.filter(
+                  (uri): uri is string =>
+                    typeof uri === 'string' && isLocalAudioUri(uri),
+                ),
+              ),
+            )
+          : [];
         return {
           ...currentState,
           teams: sanitized.teams,
@@ -1141,6 +1329,7 @@ export const useAppStore = create<AppStoreState>()(
           savedRosters: sanitized.savedRosters ?? [],
           matchProfiles: sanitized.matchProfiles ?? [],
           activeProfileId: sanitized.activeProfileId ?? null,
+          autoImportedMediaUris: rawAutoUris,
         };
       },
     },

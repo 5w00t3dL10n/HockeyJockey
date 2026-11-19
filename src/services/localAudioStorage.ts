@@ -1,5 +1,8 @@
 import {
+  buildEmbeddedMediaUri,
   createLocalAudioUri,
+  inferAudioMimeType,
+  isAcceptedAudioFileName,
   isLocalAudioUri,
   parseLocalAudioFilename,
 } from '../utils/domain.ts';
@@ -34,21 +37,173 @@ export interface SavedLocalAudioMetadata {
   artist: string;
 }
 
+export interface EmbeddedMediaItem {
+  trackUri: string;
+  fileName: string;
+  relativePath: string;
+  title: string;
+  artist: string;
+  mimeType: string;
+  sizeBytes?: number;
+  streamUrl: string;
+}
+
 const memoryStore = new Map<string, StoredLocalAudio>();
 const objectUrlCache = new Map<string, string>();
+const embeddedMediaRegistry = new Map<string, EmbeddedMediaItem>();
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
-function inferAudioMimeType(fileName: string): string {
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith('.mp3')) return 'audio/mpeg';
-  if (lower.endsWith('.wav')) return 'audio/wav';
-  if (lower.endsWith('.ogg') || lower.endsWith('.oga')) return 'audio/ogg';
-  if (lower.endsWith('.m4a') || lower.endsWith('.mp4')) return 'audio/mp4';
-  if (lower.endsWith('.flac')) return 'audio/flac';
-  if (lower.endsWith('.aac')) return 'audio/aac';
-  if (lower.endsWith('.webm')) return 'audio/webm';
-  if (lower.endsWith('.opus')) return 'audio/opus';
-  return 'application/octet-stream';
+export function registerEmbeddedMediaItems(items: EmbeddedMediaItem[]): void {
+  if (!Array.isArray(items)) {
+    return;
+  }
+  for (const item of items) {
+    if (
+      !item ||
+      typeof item.trackUri !== 'string' ||
+      !isLocalAudioUri(item.trackUri) ||
+      typeof item.streamUrl !== 'string' ||
+      !item.streamUrl.trim()
+    ) {
+      continue;
+    }
+    const cleanUri = item.trackUri.trim();
+    embeddedMediaRegistry.set(cleanUri, {
+      ...item,
+      trackUri: cleanUri,
+      streamUrl: item.streamUrl.trim(),
+    });
+  }
+}
+
+function normalizeServerMediaItem(raw: unknown): EmbeddedMediaItem | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+  const fileName = typeof obj.fileName === 'string' ? obj.fileName.trim() : '';
+  const relativePath =
+    typeof obj.relativePath === 'string' && obj.relativePath.trim()
+      ? obj.relativePath.trim()
+      : fileName;
+  const streamUrl =
+    typeof obj.streamUrl === 'string' ? obj.streamUrl.trim() : '';
+  if (!fileName || !relativePath || !streamUrl) {
+    return null;
+  }
+
+  const rawUri = typeof obj.trackUri === 'string' ? obj.trackUri.trim() : '';
+  const trackUri = isLocalAudioUri(rawUri)
+    ? rawUri
+    : buildEmbeddedMediaUri(relativePath);
+  const parsedName = parseLocalAudioFilename(fileName);
+  const title =
+    typeof obj.title === 'string' && obj.title.trim()
+      ? obj.title.trim()
+      : parsedName.title;
+  const artist =
+    typeof obj.artist === 'string' ? obj.artist.trim() : parsedName.artist;
+  const mimeType =
+    typeof obj.mimeType === 'string' && obj.mimeType.trim()
+      ? obj.mimeType.trim()
+      : inferAudioMimeType(fileName);
+  const sizeBytes =
+    typeof obj.sizeBytes === 'number' && Number.isFinite(obj.sizeBytes)
+      ? Math.max(0, obj.sizeBytes)
+      : undefined;
+
+  return {
+    trackUri,
+    fileName,
+    relativePath,
+    title,
+    artist,
+    mimeType,
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+    streamUrl,
+  };
+}
+
+function collectBundledEmbeddedMediaItems(): EmbeddedMediaItem[] {
+  let globAssets: Record<string, unknown> = {};
+  try {
+    const matched = import.meta.glob(
+      '/src/media/**/*.{mp3,wav,ogg,m4a,flac,aac,webm,opus}',
+      { eager: true, query: '?url', import: 'default' },
+    );
+    if (matched && typeof matched === 'object') {
+      globAssets = matched as Record<string, unknown>;
+    }
+  } catch {
+    return [];
+  }
+
+  const items: EmbeddedMediaItem[] = [];
+  for (const [assetPath, resolvedUrl] of Object.entries(globAssets)) {
+    if (typeof resolvedUrl !== 'string' || !resolvedUrl.trim()) {
+      continue;
+    }
+    const normalizedAssetPath = assetPath.replace(/\\/g, '/');
+    const relativePath = normalizedAssetPath
+      .replace(/^\/?src\/media\//, '')
+      .replace(/^\/+/, '');
+    const fileName = relativePath.split('/').pop() ?? relativePath;
+    if (!relativePath || !isAcceptedAudioFileName(fileName)) {
+      continue;
+    }
+    const { title, artist } = parseLocalAudioFilename(fileName);
+    items.push({
+      trackUri: buildEmbeddedMediaUri(relativePath),
+      fileName,
+      relativePath,
+      title,
+      artist,
+      mimeType: inferAudioMimeType(fileName),
+      streamUrl: resolvedUrl.trim(),
+    });
+  }
+
+  items.sort(
+    (a, b) =>
+      a.relativePath.localeCompare(b.relativePath, 'en', {
+        sensitivity: 'base',
+      }) ||
+      (a.relativePath < b.relativePath
+        ? -1
+        : a.relativePath > b.relativePath
+          ? 1
+          : 0),
+  );
+  return items;
+}
+
+export async function syncEmbeddedMediaArchive(): Promise<EmbeddedMediaItem[]> {
+  if (typeof fetch === 'function') {
+    try {
+      const response = await fetch('/api/media-archive', { cache: 'no-store' });
+      if (response.ok) {
+        const payload = (await response.json()) as unknown;
+        if (
+          typeof payload === 'object' &&
+          payload !== null &&
+          Array.isArray((payload as Record<string, unknown>).files)
+        ) {
+          const rawFiles = (payload as { files: unknown[] }).files;
+          const serverItems = rawFiles
+            .map(normalizeServerMediaItem)
+            .filter((item): item is EmbeddedMediaItem => item !== null);
+          registerEmbeddedMediaItems(serverItems);
+          return serverItems;
+        }
+      }
+    } catch {
+      // Calm Tech: fall back to bundled Vite glob assets or empty list in headless Node.js
+    }
+  }
+
+  const bundledItems = collectBundledEmbeddedMediaItems();
+  registerEmbeddedMediaItems(bundledItems);
+  return bundledItems;
 }
 
 function revokeCachedPlaybackUrl(trackUri: string): void {
@@ -260,6 +415,18 @@ export async function getLocalAudioRecord(
     return null;
   }
 
+  const embedded = embeddedMediaRegistry.get(trimmed);
+  if (embedded) {
+    return {
+      trackUri: embedded.trackUri,
+      fileName: embedded.fileName,
+      mimeType: embedded.mimeType || inferAudioMimeType(embedded.fileName),
+      sizeBytes: embedded.sizeBytes ?? 0,
+      data: new Uint8Array(0),
+      createdAt: 'embedded-media-archive',
+    };
+  }
+
   const idbResult = await runIdbRequest<StoredLocalAudio | undefined>(
     'readonly',
     (store) => store.get(trimmed),
@@ -277,6 +444,11 @@ export async function getLocalAudioPlaybackUrl(
   const trimmed = typeof trackUri === 'string' ? trackUri.trim() : '';
   if (!isLocalAudioUri(trimmed)) {
     return null;
+  }
+
+  const embedded = embeddedMediaRegistry.get(trimmed);
+  if (embedded && embedded.streamUrl) {
+    return embedded.streamUrl;
   }
 
   const cached = objectUrlCache.get(trimmed);

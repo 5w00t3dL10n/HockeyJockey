@@ -1653,6 +1653,210 @@ console.log(JSON.stringify({
             ],
         )
 
+    def test_17_is_accepted_audio_file_name(self) -> None:
+        """Verify isAcceptedAudioFileName accepts all 8 audio extensions case-insensitively and rejects non-audio or hidden files."""
+        script = """
+import {
+  ACCEPTED_AUDIO_EXTENSIONS,
+  isAcceptedAudioFileName,
+} from './src/utils/domain.ts';
+
+const accepted = {
+  mp3Lower: isAcceptedAudioFileName('horn.mp3'),
+  wavLower: isAcceptedAudioFileName('goal.wav'),
+  oggLower: isAcceptedAudioFileName('chant.ogg'),
+  m4aLower: isAcceptedAudioFileName('organ.m4a'),
+  flacLower: isAcceptedAudioFileName('anthem.flac'),
+  aacLower: isAcceptedAudioFileName('jingle.aac'),
+  webmLower: isAcceptedAudioFileName('clip.webm'),
+  opusLower: isAcceptedAudioFileName('drop.opus'),
+  mp3Upper: isAcceptedAudioFileName('GOAL_HORN.MP3'),
+  wavMixed: isAcceptedAudioFileName('PowerPlay.Wav'),
+  oggMixed: isAcceptedAudioFileName('Arena_Chant.OgG'),
+  m4aTrimmed: isAcceptedAudioFileName('  Organ_Loop.M4a  '),
+  flacNestedPosix: isAcceptedAudioFileName('intermission/Anthem.FLAC'),
+  aacMixed: isAcceptedAudioFileName('Jingle.AaC'),
+  webmMixed: isAcceptedAudioFileName('Clip.WeBm'),
+  opusNestedWin: isAcceptedAudioFileName('C:\\\\Media\\\\Sounds\\\\Drop.OPUS'),
+};
+
+const rejected = {
+  txt: isAcceptedAudioFileName('readme.txt'),
+  png: isAcceptedAudioFileName('logo.png'),
+  gitkeep: isAcceptedAudioFileName('.gitkeep'),
+  dsStore: isAcceptedAudioFileName('.DS_Store'),
+  hiddenMp3: isAcceptedAudioFileName('.hidden.mp3'),
+  hiddenNestedPosix: isAcceptedAudioFileName('subfolder/.hidden.wav'),
+  hiddenNestedWin: isAcceptedAudioFileName('C:\\\\Audio\\\\.secret.ogg'),
+  empty: isAcceptedAudioFileName(''),
+  whitespace: isAcceptedAudioFileName('   '),
+  trailingSlashPosix: isAcceptedAudioFileName('folder/'),
+  trailingSlashWin: isAcceptedAudioFileName('folder\\\\'),
+  noDotMp3: isAcceptedAudioFileName('mp3'),
+  noExtension: isAcceptedAudioFileName('noextension'),
+  backupExt: isAcceptedAudioFileName('song.mp3.bak'),
+};
+
+console.log(JSON.stringify({
+  acceptedExtensions: [...ACCEPTED_AUDIO_EXTENSIONS],
+  accepted,
+  rejected,
+}));
+"""
+        res = run_ts_script(script)
+        self.assertEqual(
+            res["acceptedExtensions"],
+            [".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".webm", ".opus"],
+        )
+        for key, val in res["accepted"].items():
+            self.assertIs(val, True, f"Expected True for accepted case {key!r}, got {val!r}")
+        for key, val in res["rejected"].items():
+            self.assertIs(val, False, f"Expected False for rejected case {key!r}, got {val!r}")
+
+    def test_18_infer_audio_mime_type(self) -> None:
+        """Verify inferAudioMimeType maps all supported audio extensions (case-insensitive) and returns octet-stream fallback."""
+        script = """
+import { inferAudioMimeType } from './src/utils/domain.ts';
+
+console.log(JSON.stringify({
+  mp3Lower: inferAudioMimeType('speaker.mp3'),
+  mp3UpperNested: inferAudioMimeType('archive/SPEAKER.MP3'),
+  wavLower: inferAudioMimeType('horn.wav'),
+  wavUpper: inferAudioMimeType('HORN.WAV'),
+  oggLower: inferAudioMimeType('chant.ogg'),
+  oggUpper: inferAudioMimeType('CHANT.OGG'),
+  ogaLower: inferAudioMimeType('chant.oga'),
+  m4aLower: inferAudioMimeType('organ.m4a'),
+  m4aUpper: inferAudioMimeType('ORGAN.M4A'),
+  mp4Lower: inferAudioMimeType('clip.mp4'),
+  flacLower: inferAudioMimeType('anthem.flac'),
+  flacUpper: inferAudioMimeType('ANTHEM.FLAC'),
+  aacLower: inferAudioMimeType('jingle.aac'),
+  aacUpper: inferAudioMimeType('JINGLE.AAC'),
+  webmLower: inferAudioMimeType('stream.webm'),
+  webmUpper: inferAudioMimeType('STREAM.WEBM'),
+  opusLower: inferAudioMimeType('voice.opus'),
+  opusUpper: inferAudioMimeType('VOICE.OPUS'),
+  txtFallback: inferAudioMimeType('notes.txt'),
+  pngFallback: inferAudioMimeType('cover.png'),
+  gitkeepFallback: inferAudioMimeType('.gitkeep'),
+  emptyFallback: inferAudioMimeType(''),
+  noExtFallback: inferAudioMimeType('audiofile'),
+}));
+"""
+        res = run_ts_script(script)
+        expected = {
+            "mp3Lower": "audio/mpeg",
+            "mp3UpperNested": "audio/mpeg",
+            "wavLower": "audio/wav",
+            "wavUpper": "audio/wav",
+            "oggLower": "audio/ogg",
+            "oggUpper": "audio/ogg",
+            "ogaLower": "audio/ogg",
+            "m4aLower": "audio/mp4",
+            "m4aUpper": "audio/mp4",
+            "mp4Lower": "audio/mp4",
+            "flacLower": "audio/flac",
+            "flacUpper": "audio/flac",
+            "aacLower": "audio/aac",
+            "aacUpper": "audio/aac",
+            "webmLower": "audio/webm",
+            "webmUpper": "audio/webm",
+            "opusLower": "audio/opus",
+            "opusUpper": "audio/opus",
+            "txtFallback": "application/octet-stream",
+            "pngFallback": "application/octet-stream",
+            "gitkeepFallback": "application/octet-stream",
+            "emptyFallback": "application/octet-stream",
+            "noExtFallback": "application/octet-stream",
+        }
+        for key, mime in expected.items():
+            self.assertEqual(res[key], mime, f"MIME mismatch for {key!r}")
+
+    def test_19_build_embedded_media_uri(self) -> None:
+        """Verify buildEmbeddedMediaUri produces deterministic, valid local:audio:media-... URIs without collisions."""
+        script = """
+import {
+  buildEmbeddedMediaUri,
+  isLocalAudioUri,
+  tryParseSpotifyUri,
+} from './src/utils/domain.ts';
+
+const realFileA = buildEmbeddedMediaUri('matchva-rd-speaker-kvinna-standard.mp3');
+const realFileARepeat = buildEmbeddedMediaUri('matchva-rd-speaker-kvinna-standard.mp3');
+
+const normVariants = [
+  buildEmbeddedMediaUri('goals/horn.mp3'),
+  buildEmbeddedMediaUri('./goals/horn.mp3'),
+  buildEmbeddedMediaUri('/goals/horn.mp3'),
+  buildEmbeddedMediaUri('goals\\\\horn.mp3'),
+  buildEmbeddedMediaUri('goals//horn.mp3'),
+  buildEmbeddedMediaUri('  goals/horn.mp3  '),
+];
+
+const emptyFallback = buildEmbeddedMediaUri('');
+const whitespaceFallback = buildEmbeddedMediaUri('   ');
+
+const longPrefix = 'very-long-archive-directory-name-exceeding-eighty-characters-to-verify-slug-truncation-001';
+const distinctInputs = [
+  'horn.mp3',
+  'period1/horn.mp3',
+  'period2/horn.mp3',
+  'period1/sub/horn.mp3',
+  'horn.wav',
+  'horn.ogg',
+  'horn.m4a',
+  'horn.flac',
+  'horn.aac',
+  'horn.webm',
+  'horn.opus',
+  'goal_horn.mp3',
+  'goal-horn.mp3',
+  'goal horn.mp3',
+  'målhorn.mp3',
+  'malhorn.mp3',
+  'hörn.wav',
+  'horn_sv.wav',
+  `${longPrefix}/track-alpha.mp3`,
+  `${longPrefix}/track-beta.mp3`,
+];
+
+const distinctUris = distinctInputs.map((input) => buildEmbeddedMediaUri(input));
+const allUris = [realFileA, emptyFallback, whitespaceFallback, ...normVariants, ...distinctUris];
+
+console.log(JSON.stringify({
+  realFileA,
+  realFileARepeat,
+  normVariants,
+  emptyFallback,
+  whitespaceFallback,
+  distinctUris,
+  allValidLocal: allUris.every((uri) => isLocalAudioUri(uri)),
+  allStartWithMediaPrefix: allUris.every((uri) => uri.startsWith('local:audio:media-')),
+  allPassTryParse: allUris.every((uri) => {
+    const parsed = tryParseSpotifyUri(uri);
+    return parsed.ok && parsed.uri === uri;
+  }),
+}));
+"""
+        res = run_ts_script(script)
+        self.assertTrue(res["allValidLocal"])
+        self.assertTrue(res["allStartWithMediaPrefix"])
+        self.assertTrue(res["allPassTryParse"])
+
+        self.assertEqual(res["realFileA"], res["realFileARepeat"])
+        self.assertEqual(res["emptyFallback"], res["whitespaceFallback"])
+
+        for variant in res["normVariants"]:
+            self.assertEqual(variant, res["normVariants"][0])
+
+        distinct_uris = res["distinctUris"]
+        self.assertEqual(
+            len(distinct_uris),
+            len(set(distinct_uris)),
+            f"URI collision detected in buildEmbeddedMediaUri: {distinct_uris}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

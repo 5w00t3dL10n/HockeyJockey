@@ -495,6 +495,83 @@ export function parseSpotifyMetadataPayload(
   return null;
 }
 
+export const ACCEPTED_AUDIO_EXTENSIONS = [
+  '.mp3',
+  '.wav',
+  '.ogg',
+  '.m4a',
+  '.flac',
+  '.aac',
+  '.webm',
+  '.opus',
+] as const;
+
+export function isAcceptedAudioFileName(fileName: string): boolean {
+  if (typeof fileName !== 'string') {
+    return false;
+  }
+  const trimmed = fileName.trim();
+  if (!trimmed || trimmed.endsWith('/') || trimmed.endsWith('\\')) {
+    return false;
+  }
+  const baseName = (trimmed.split(/[\\/]/).pop() ?? '').trim();
+  if (!baseName || baseName.startsWith('.')) {
+    return false;
+  }
+  const lower = baseName.toLowerCase();
+  return ACCEPTED_AUDIO_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+export function inferAudioMimeType(fileName: string): string {
+  const lower = typeof fileName === 'string' ? fileName.trim().toLowerCase() : '';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.ogg') || lower.endsWith('.oga')) return 'audio/ogg';
+  if (lower.endsWith('.m4a') || lower.endsWith('.mp4')) return 'audio/mp4';
+  if (lower.endsWith('.flac')) return 'audio/flac';
+  if (lower.endsWith('.aac')) return 'audio/aac';
+  if (lower.endsWith('.webm')) return 'audio/webm';
+  if (lower.endsWith('.opus')) return 'audio/opus';
+  return 'application/octet-stream';
+}
+
+function hashMediaPathHex(input: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 = Math.imul(h2 ^ (ch + i), 0x85ebca6b);
+  }
+  const part1 = (h1 >>> 0).toString(16).padStart(8, '0');
+  const part2 = (h2 >>> 0).toString(16).padStart(8, '0');
+  return `${part1}${part2}`.slice(0, 10);
+}
+
+export function buildEmbeddedMediaUri(relativePathOrName: string): string {
+  const raw =
+    typeof relativePathOrName === 'string' ? relativePathOrName.trim() : '';
+  const normalized = raw
+    .replace(/\\/g, '/')
+    .replace(/^(\.\/)+/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/');
+
+  const slug = normalized
+    .toLowerCase()
+    .replace(/[åä]/g, 'a')
+    .replace(/ö/g, 'o')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80)
+    .replace(/-+$/g, '');
+
+  const hash = hashMediaPathHex(normalized || 'file');
+  const suffix = slug ? `media-${slug}-${hash}` : `media-file-${hash}`;
+  return `local:audio:${suffix}`;
+}
+
 export function isLocalAudioUri(input: string): boolean {
   if (typeof input !== 'string') {
     return false;

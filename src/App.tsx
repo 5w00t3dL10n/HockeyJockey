@@ -10,6 +10,7 @@ import { SetupView } from './components/SetupView.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.ts';
 import { audioController } from './services/audioController.ts';
+import { syncEmbeddedMediaArchive } from './services/localAudioStorage.ts';
 import {
   ensureConsistentLoopbackOrigin,
   getStoredSpotifyAuth,
@@ -80,6 +81,18 @@ export function App() {
           'Ingen aktiv Spotify-spelare hittades. Öppna Spotify-appen på datorn eller mobilen (eller aktivera Widevine DRM i webbläsaren) och klicka på Återanslut Spotify.',
       );
     }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void syncEmbeddedMediaArchive().then((items) => {
+      if (active) {
+        useAppStore.getState().importEmbeddedMediaArchive(items);
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {

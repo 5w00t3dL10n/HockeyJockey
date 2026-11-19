@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, AND section 4 of 09_oracle_spotify_resilience_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, AND section 4 of 11_oracle_custom_soundboard_groups_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
@@ -15,6 +15,8 @@ Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 
 11. Spotify track metadata (`fetchSpotifyTrackMetadata` graceful `null` on invalid URLs & `extractSpotifyTrackId` + `parseSpotifyMetadataPayload` with user example URL).
 12. Self-healing `AudioController.playAt()` via `ensureReady()` and permanent failing adapter fallback to `'simulated'`.
 13. `SpotifyPlayerService.discoverConnectDevice()` & `'connect'` transport (`playTrack` 404->transfer/discovery->204 retry, `pause`, throttled `setVolume`).
+14. Zustand `useAppStore` custom `SoundboardGroup` CRUD (`addSoundboardGroup`, `updateSoundboardGroup`, `moveSoundboardGroup`, `deleteSoundboardGroup` with safe pad fallback migration).
+15. Zustand `useAppStore` `MatchProfile` switching across profiles with distinct custom `soundboardGroups` and full JSON export/import round-trip (`exportConfigJson` -> `importConfigJson`).
 
 Deterministic exit codes:
 - 0: All oracle checks passed.
@@ -1656,6 +1658,463 @@ try {
         )
 
 
+def check_store_custom_soundboard_groups_crud_and_migration() -> None:
+    """Oracle 14: Verify useAppStore SoundboardGroup CRUD, ordering, and safe pad fallback migration."""
+    script = """
+import { DEFAULT_SOUNDBOARD_GROUPS, PAD_CATEGORY_LABELS } from './src/data/defaults.ts';
+import { useAppStore } from './src/store/useAppStore.ts';
+
+useAppStore.getState().resetToDefaults();
+const initialGroups = useAppStore.getState().settings.soundboardGroups.map((g) => ({ ...g }));
+
+// 1. Add custom groups (explicit customId and auto-generated slug id)
+const introId = useAppStore.getState().addSoundboardGroup('Intro & Uppvärmning', 'group-intro');
+const pauseId = useAppStore.getState().addSoundboardGroup('Pausunderhållning');
+
+// Duplicate & event-category protection
+const dupByLabelId = useAppStore.getState().addSoundboardGroup('  intro & uppvärmning  ');
+const dupByCustomId = useAppStore.getState().addSoundboardGroup('Annat Namn', 'group-intro');
+const emptyLabelId = useAppStore.getState().addSoundboardGroup('   ');
+const forbiddenEventCustomId = useAppStore.getState().addSoundboardGroup('Temp Event Guard', 'goal_home');
+const groupsAfterForbiddenAttempt = useAppStore.getState().settings.soundboardGroups.map((g) => g.id);
+if (forbiddenEventCustomId) {
+  useAppStore.getState().deleteSoundboardGroup(forbiddenEventCustomId);
+}
+
+const groupsAfterAdd = useAppStore.getState().settings.soundboardGroups.map((g) => ({ ...g }));
+
+// 2. Update label (and verify blank update is ignored)
+useAppStore.getState().updateSoundboardGroup('group-intro', 'Intro & Entré');
+useAppStore.getState().updateSoundboardGroup('group-intro', '   ');
+const introAfterUpdate = useAppStore.getState().settings.soundboardGroups.find((g) => g.id === 'group-intro') ?? null;
+
+// 3. Move groups (up, down, and boundary no-ops)
+const idsBeforeMoves = useAppStore.getState().settings.soundboardGroups.map((g) => g.id);
+useAppStore.getState().moveSoundboardGroup(idsBeforeMoves[0], 'up');
+const idsAfterTopBoundaryUp = useAppStore.getState().settings.soundboardGroups.map((g) => g.id);
+
+useAppStore.getState().moveSoundboardGroup(pauseId, 'down');
+const idsAfterBottomBoundaryDown = useAppStore.getState().settings.soundboardGroups.map((g) => g.id);
+
+useAppStore.getState().moveSoundboardGroup('group-intro', 'up');
+const idsAfterMoveIntroUp = useAppStore.getState().settings.soundboardGroups.map((g) => g.id);
+
+useAppStore.getState().moveSoundboardGroup('group-intro', 'down');
+const idsAfterMoveIntroDown = useAppStore.getState().settings.soundboardGroups.map((g) => g.id);
+
+// 4. Add SoundPads assigned to the custom groups
+useAppStore.getState().addSoundPad({
+  id: 'pad-intro-1',
+  label: 'Intro Låt 1',
+  category: 'group-intro',
+  color: '#2563eb',
+  volume: 0.9,
+  triggerFlow: null,
+  hotkey: 'Digit7',
+  tracks: [
+    {
+      trackUri: 'spotify:track:4uLU6hMCjMI75M1A2tKUQC',
+      title: 'Intro Song 1',
+      artist: 'Arena Band',
+      startTimeMs: 5000,
+    },
+  ],
+});
+useAppStore.getState().addSoundPad({
+  id: 'pad-intro-2',
+  label: 'Intro Låt 2',
+  category: 'group-intro',
+  color: '#1d4ed8',
+  volume: 0.8,
+  triggerFlow: null,
+  tracks: [
+    {
+      trackUri: 'spotify:track:2KH16WveTQWT6KOG9Rg6e2',
+      title: 'Intro Song 2',
+      artist: 'Warmup DJ',
+      startTimeMs: 10000,
+    },
+  ],
+});
+useAppStore.getState().addSoundPad({
+  id: 'pad-pause-1',
+  label: 'Paus Låt 1',
+  category: pauseId,
+  color: '#059669',
+  volume: 0.85,
+  triggerFlow: null,
+  hotkey: 'Digit8',
+  tracks: [
+    {
+      trackUri: 'spotify:track:5CQ30WqJwcep0pYcV4AMNc',
+      title: 'Pause Song',
+      artist: 'Arena Mix',
+      startTimeMs: 12000,
+    },
+  ],
+});
+
+const padCountBeforeDelete = useAppStore.getState().soundPads.length;
+
+// 5a. Delete 'group-intro' with explicit fallback to pauseId -> pads must migrate safely without deletion
+useAppStore.getState().deleteSoundboardGroup('group-intro', pauseId);
+const groupsAfterDeleteIntro = useAppStore.getState().settings.soundboardGroups.map((g) => g.id);
+const padsAfterDeleteIntro = useAppStore.getState().soundPads.map((p) => ({ ...p }));
+
+// 5b. Delete pauseId WITHOUT explicit fallback -> pads migrate safely to remainingGroups[0].id
+const expectedAutoFallbackId = groupsAfterDeleteIntro[0];
+useAppStore.getState().deleteSoundboardGroup(pauseId);
+const groupsAfterDeletePause = useAppStore.getState().settings.soundboardGroups.map((g) => g.id);
+const padsAfterDeletePause = useAppStore.getState().soundPads.map((p) => ({ ...p }));
+
+// 5c. Delete all remaining groups down to and including the final group -> auto-creates 'misc' fallback & migrates pads safely
+for (const gid of [...groupsAfterDeletePause]) {
+  useAppStore.getState().deleteSoundboardGroup(gid);
+}
+const groupsAfterDeleteAll = useAppStore.getState().settings.soundboardGroups.map((g) => ({ ...g }));
+const padsAfterDeleteAll = useAppStore.getState().soundPads.map((p) => ({ ...p }));
+
+console.log(JSON.stringify({
+  defaultGroups: DEFAULT_SOUNDBOARD_GROUPS,
+  miscBuiltinLabel: PAD_CATEGORY_LABELS.misc,
+  initialGroups,
+  introId,
+  pauseId,
+  dupByLabelId,
+  dupByCustomId,
+  emptyLabelId,
+  forbiddenEventCustomId,
+  groupsAfterForbiddenAttempt,
+  groupsAfterAdd,
+  introAfterUpdate,
+  idsBeforeMoves,
+  idsAfterTopBoundaryUp,
+  idsAfterBottomBoundaryDown,
+  idsAfterMoveIntroUp,
+  idsAfterMoveIntroDown,
+  padCountBeforeDelete,
+  groupsAfterDeleteIntro,
+  padsAfterDeleteIntro,
+  expectedAutoFallbackId,
+  groupsAfterDeletePause,
+  padsAfterDeletePause,
+  groupsAfterDeleteAll,
+  padsAfterDeleteAll,
+}));
+"""
+    res = run_ts_script(script)
+
+    if res["initialGroups"] != res["defaultGroups"]:
+        raise AssertionError(f"Unexpected initial soundboardGroups: {res['initialGroups']!r}")
+    if res["introId"] != "group-intro":
+        raise AssertionError(f"Expected custom group id 'group-intro', got {res['introId']!r}")
+    if not isinstance(res["pauseId"], str) or not res["pauseId"] or res["pauseId"] == "group-intro":
+        raise AssertionError(f"Expected non-empty unique generated group id for pause group, got {res['pauseId']!r}")
+
+    if res["dupByLabelId"] != "group-intro" or res["dupByCustomId"] != "group-intro":
+        raise AssertionError(
+            f"addSoundboardGroup did not deduplicate existing group: labelDup={res['dupByLabelId']!r}, idDup={res['dupByCustomId']!r}"
+        )
+    if res["emptyLabelId"] != "":
+        raise AssertionError(f"Expected '' for blank group label, got {res['emptyLabelId']!r}")
+    if res["forbiddenEventCustomId"] == "goal_home" or "goal_home" in res["groupsAfterForbiddenAttempt"]:
+        raise AssertionError(
+            f"Event category 'goal_home' must never be accepted as a soundboardGroup id: {res['groupsAfterForbiddenAttempt']!r}"
+        )
+
+    expected_after_add = [
+        *res["defaultGroups"],
+        {"id": "group-intro", "label": "Intro & Uppvärmning", "isBuiltin": False},
+        {"id": res["pauseId"], "label": "Pausunderhållning", "isBuiltin": False},
+    ]
+    if res["groupsAfterAdd"] != expected_after_add:
+        raise AssertionError(
+            f"soundboardGroups after add mismatch:\nEXPECTED: {expected_after_add!r}\nACTUAL:   {res['groupsAfterAdd']!r}"
+        )
+
+    if res["introAfterUpdate"] != {"id": "group-intro", "label": "Intro & Entré", "isBuiltin": False}:
+        raise AssertionError(f"updateSoundboardGroup failed: {res['introAfterUpdate']!r}")
+
+    ids_base = res["idsBeforeMoves"]
+    if res["idsAfterTopBoundaryUp"] != ids_base or res["idsAfterBottomBoundaryDown"] != ids_base:
+        raise AssertionError("moveSoundboardGroup boundary up/down was not a no-op")
+
+    expected_after_up = list(ids_base)
+    intro_idx = expected_after_up.index("group-intro")
+    expected_after_up[intro_idx - 1], expected_after_up[intro_idx] = (
+        expected_after_up[intro_idx],
+        expected_after_up[intro_idx - 1],
+    )
+    if res["idsAfterMoveIntroUp"] != expected_after_up:
+        raise AssertionError(
+            f"moveSoundboardGroup('group-intro', 'up') mismatch: expected {expected_after_up!r}, got {res['idsAfterMoveIntroUp']!r}"
+        )
+    if res["idsAfterMoveIntroDown"] != ids_base:
+        raise AssertionError(
+            f"moveSoundboardGroup('group-intro', 'down') did not restore original order: expected {ids_base!r}, got {res['idsAfterMoveIntroDown']!r}"
+        )
+
+    pad_count = res["padCountBeforeDelete"]
+    if "group-intro" in res["groupsAfterDeleteIntro"]:
+        raise AssertionError("deleteSoundboardGroup('group-intro', pauseId) did not remove 'group-intro'")
+
+    pads_after_intro_del = res["padsAfterDeleteIntro"]
+    if len(pads_after_intro_del) != pad_count:
+        raise AssertionError(
+            f"deleteSoundboardGroup deleted pads instead of migrating: before={pad_count}, after={len(pads_after_intro_del)}"
+        )
+    pads_map_1 = {p["id"]: p for p in pads_after_intro_del}
+    if (
+        pads_map_1["pad-intro-1"]["category"] != res["pauseId"]
+        or pads_map_1["pad-intro-1"].get("hotkey") != "7"
+        or pads_map_1["pad-intro-1"]["tracks"][0]["title"] != "Intro Song 1"
+        or pads_map_1["pad-intro-2"]["category"] != res["pauseId"]
+        or pads_map_1["pad-intro-2"]["tracks"][0]["title"] != "Intro Song 2"
+    ):
+        raise AssertionError(f"Pads in 'group-intro' did not migrate safely to {res['pauseId']!r}: {pads_map_1!r}")
+
+    if res["pauseId"] in res["groupsAfterDeletePause"]:
+        raise AssertionError(f"deleteSoundboardGroup({res['pauseId']!r}) did not remove group")
+
+    pads_after_pause_del = res["padsAfterDeletePause"]
+    if len(pads_after_pause_del) != pad_count:
+        raise AssertionError(
+            f"Auto-fallback deleteSoundboardGroup deleted pads: before={pad_count}, after={len(pads_after_pause_del)}"
+        )
+    pads_map_2 = {p["id"]: p for p in pads_after_pause_del}
+    auto_fb = res["expectedAutoFallbackId"]
+    for pid in ("pad-intro-1", "pad-intro-2", "pad-pause-1"):
+        if pads_map_2[pid]["category"] != auto_fb:
+            raise AssertionError(
+                f"Pad {pid!r} expected to migrate to auto-fallback {auto_fb!r}, got {pads_map_2[pid]['category']!r}"
+            )
+    if pads_map_2["pad-pause-1"].get("hotkey") != "8":
+        raise AssertionError(f"Pad 'pad-pause-1' lost hotkey after migration: {pads_map_2['pad-pause-1']!r}")
+
+    if res["groupsAfterDeleteAll"] != [{"id": "misc", "label": res["miscBuiltinLabel"], "isBuiltin": True}]:
+        raise AssertionError(
+            f"Deleting final remaining group did not restore safe 'misc' fallback group: {res['groupsAfterDeleteAll']!r}"
+        )
+    pads_after_all_del = res["padsAfterDeleteAll"]
+    if len(pads_after_all_del) != pad_count:
+        raise AssertionError(
+            f"Deleting all groups lost SoundPads: before={pad_count}, after={len(pads_after_all_del)}"
+        )
+    pads_map_3 = {p["id"]: p for p in pads_after_all_del}
+    for pid in ("pad-intro-1", "pad-intro-2", "pad-pause-1"):
+        if pads_map_3[pid]["category"] != "misc":
+            raise AssertionError(
+                f"Pad {pid!r} expected to migrate to 'misc' fallback when final group deleted, got {pads_map_3[pid]['category']!r}"
+            )
+
+
+def check_store_custom_groups_profiles_and_json_roundtrip() -> None:
+    """Oracle 15: Verify MatchProfile switching with distinct custom soundboardGroups and full JSON export/import round-trip."""
+    script = """
+import { DEFAULT_SOUNDBOARD_GROUPS } from './src/data/defaults.ts';
+import { useAppStore } from './src/store/useAppStore.ts';
+
+useAppStore.getState().resetToDefaults();
+
+// 1. Configure Profile A with custom group 'group-intro' moved to index 0 and assigned pad
+useAppStore.getState().addSoundboardGroup('Intro & Uppvärmning', 'group-intro');
+for (let i = 0; i < 6; i += 1) {
+  useAppStore.getState().moveSoundboardGroup('group-intro', 'up');
+}
+useAppStore.getState().addSoundPad({
+  id: 'pad-prof-a-intro',
+  label: 'A-Lag Intro',
+  category: 'group-intro',
+  color: '#2563eb',
+  volume: 0.95,
+  triggerFlow: null,
+  hotkey: 'Digit5',
+  tracks: [
+    {
+      trackUri: 'spotify:track:1111111111111111111111',
+      title: 'Profile A Intro Anthem',
+      artist: 'Arena A',
+      startTimeMs: 12000,
+    },
+  ],
+});
+const profileAId = useAppStore.getState().saveCurrentAsMatchProfile('Profil A Intro', 'Senior', false);
+
+// 2. Configure Profile B with distinct custom group 'group-paus-show', renamed builtin group 'organ', and assigned pad
+useAppStore.getState().deleteSoundboardGroup('group-intro', 'misc');
+useAppStore.getState().addSoundboardGroup('Pausshow & Tävling', 'group-paus-show');
+useAppStore.getState().updateSoundboardGroup('organ', 'Arenaorgel Live');
+useAppStore.getState().deleteSoundPad('pad-prof-a-intro');
+useAppStore.getState().addSoundPad({
+  id: 'pad-prof-b-paus',
+  label: 'Pausshow Låt',
+  category: 'group-paus-show',
+  color: '#059669',
+  volume: 0.85,
+  triggerFlow: null,
+  hotkey: 'Digit6',
+  tracks: [
+    {
+      trackUri: 'spotify:track:2222222222222222222222',
+      title: 'Profile B Intermission',
+      artist: 'Arena B',
+      startTimeMs: 30000,
+    },
+  ],
+});
+const profileBId = useAppStore.getState().saveCurrentAsMatchProfile('Profil B Paus', 'Ungdom', false);
+
+function captureSnapshot() {
+  const st = useAppStore.getState();
+  return {
+    teams: st.teams,
+    soundPads: st.soundPads,
+    settings: st.settings,
+    savedRosters: st.savedRosters,
+    matchProfiles: st.matchProfiles,
+    activeProfileId: st.activeProfileId,
+  };
+}
+
+// 3. Deterministic MatchProfile switching: A -> B -> A -> default -> A
+const actA1 = useAppStore.getState().activateMatchProfile(profileAId);
+const stateA1 = captureSnapshot();
+
+const actB1 = useAppStore.getState().activateMatchProfile(profileBId);
+const stateB1 = captureSnapshot();
+
+const actA2 = useAppStore.getState().activateMatchProfile(profileAId);
+const stateA2 = captureSnapshot();
+
+const actDefault = useAppStore.getState().activateMatchProfile('profile-u12-standard');
+const groupsOnDefault = useAppStore.getState().settings.soundboardGroups.map((g) => ({ ...g }));
+
+const actA3 = useAppStore.getState().activateMatchProfile(profileAId);
+const beforeExport = captureSnapshot();
+
+// 4. Full JSON export/import round-trip (exportConfigJson -> resetToDefaults -> importConfigJson)
+const exportedJson = useAppStore.getState().exportConfigJson();
+const parsedExport = JSON.parse(exportedJson);
+
+useAppStore.getState().resetToDefaults();
+const wipedGroups = useAppStore.getState().settings.soundboardGroups.map((g) => ({ ...g }));
+const wipedHasProfAPad = useAppStore.getState().soundPads.some((p) => p.id === 'pad-prof-a-intro');
+
+const importedReturn = useAppStore.getState().importConfigJson(exportedJson);
+const afterImport = captureSnapshot();
+
+// Verify switching to Profile B still works cleanly after importConfigJson
+const actBAfterImport = useAppStore.getState().activateMatchProfile(profileBId);
+const stateBAfterImport = captureSnapshot();
+
+console.log(JSON.stringify({
+  defaultGroups: DEFAULT_SOUNDBOARD_GROUPS,
+  profileAId,
+  profileBId,
+  actA1,
+  actB1,
+  actA2,
+  actDefault,
+  actA3,
+  stateA1,
+  stateB1,
+  stateA2,
+  groupsOnDefault,
+  beforeExport,
+  parsedExport,
+  wipedGroups,
+  wipedHasProfAPad,
+  importedReturn: {
+    teams: importedReturn.teams,
+    soundPads: importedReturn.soundPads,
+    settings: importedReturn.settings,
+    savedRosters: importedReturn.savedRosters ?? [],
+    matchProfiles: importedReturn.matchProfiles ?? [],
+    activeProfileId: importedReturn.activeProfileId ?? null,
+  },
+  afterImport,
+  actBAfterImport,
+  stateBAfterImport,
+}));
+"""
+    res = run_ts_script(script)
+
+    for key in ("actA1", "actB1", "actA2", "actDefault", "actA3", "actBAfterImport"):
+        if res[key] is not True:
+            raise AssertionError(f"activateMatchProfile failed for {key}")
+
+    a1 = res["stateA1"]
+    b1 = res["stateB1"]
+    a2 = res["stateA2"]
+
+    if a1 != a2:
+        raise AssertionError("MatchProfile switching A -> B -> A was not deterministic for custom soundboardGroups/pads")
+
+    a1_groups = a1["settings"]["soundboardGroups"]
+    a1_group_ids = [g["id"] for g in a1_groups]
+    if a1_groups[0] != {"id": "group-intro", "label": "Intro & Uppvärmning", "isBuiltin": False}:
+        raise AssertionError(f"Profile A expected 'group-intro' at index 0, got {a1_groups[0]!r}")
+    if "group-paus-show" in a1_group_ids:
+        raise AssertionError(f"Profile A leaked 'group-paus-show': {a1_group_ids!r}")
+    a1_organ = next((g for g in a1_groups if g["id"] == "organ"), None)
+    if not a1_organ or a1_organ["label"] != "Orgel / Publikpepp":
+        raise AssertionError(f"Profile A expected default 'organ' label, got {a1_organ!r}")
+    a1_pads = {p["id"]: p for p in a1["soundPads"]}
+    if "pad-prof-a-intro" not in a1_pads or "pad-prof-b-paus" in a1_pads:
+        raise AssertionError(f"Profile A soundPads mismatch: {list(a1_pads.keys())!r}")
+    if a1_pads["pad-prof-a-intro"]["category"] != "group-intro" or a1_pads["pad-prof-a-intro"].get("hotkey") != "5":
+        raise AssertionError(f"Profile A pad category/hotkey mismatch: {a1_pads['pad-prof-a-intro']!r}")
+
+    b1_groups = b1["settings"]["soundboardGroups"]
+    b1_group_ids = [g["id"] for g in b1_groups]
+    if "group-paus-show" not in b1_group_ids or "group-intro" in b1_group_ids:
+        raise AssertionError(f"Profile B soundboardGroups mismatch: {b1_group_ids!r}")
+    b1_paus = next((g for g in b1_groups if g["id"] == "group-paus-show"), None)
+    b1_organ = next((g for g in b1_groups if g["id"] == "organ"), None)
+    if b1_paus != {"id": "group-paus-show", "label": "Pausshow & Tävling", "isBuiltin": False}:
+        raise AssertionError(f"Profile B 'group-paus-show' mismatch: {b1_paus!r}")
+    if not b1_organ or b1_organ["label"] != "Arenaorgel Live":
+        raise AssertionError(f"Profile B renamed 'organ' label mismatch: {b1_organ!r}")
+    b1_pads = {p["id"]: p for p in b1["soundPads"]}
+    if "pad-prof-b-paus" not in b1_pads or "pad-prof-a-intro" in b1_pads:
+        raise AssertionError(f"Profile B soundPads mismatch: {list(b1_pads.keys())!r}")
+    if b1_pads["pad-prof-b-paus"]["category"] != "group-paus-show" or b1_pads["pad-prof-b-paus"].get("hotkey") != "6":
+        raise AssertionError(f"Profile B pad category/hotkey mismatch: {b1_pads['pad-prof-b-paus']!r}")
+
+    if res["groupsOnDefault"] != res["defaultGroups"]:
+        raise AssertionError(
+            f"Default profile U12 soundboardGroups mismatch: expected {res['defaultGroups']!r}, got {res['groupsOnDefault']!r}"
+        )
+
+    if res["wipedGroups"] != res["defaultGroups"] or res["wipedHasProfAPad"] is not False:
+        raise AssertionError("resetToDefaults did not wipe custom soundboardGroups/pads prior to importConfigJson check")
+
+    parsed_export_groups = res["parsedExport"]["settings"]["soundboardGroups"]
+    if parsed_export_groups[0] != {"id": "group-intro", "label": "Intro & Uppvärmning", "isBuiltin": False}:
+        raise AssertionError(f"Exported JSON missing custom group-intro at index 0: {parsed_export_groups!r}")
+
+    before = res["beforeExport"]
+    for label, actual in (
+        ("importConfigJson return value", res["importedReturn"]),
+        ("store after importConfigJson", res["afterImport"]),
+    ):
+        if actual["settings"]["soundboardGroups"] != before["settings"]["soundboardGroups"]:
+            raise AssertionError(f"soundboardGroups mismatch in {label}")
+        if actual["soundPads"] != before["soundPads"]:
+            raise AssertionError(f"soundPads mismatch in {label}")
+        if actual["matchProfiles"] != before["matchProfiles"]:
+            raise AssertionError(f"matchProfiles mismatch in {label}")
+        if actual["activeProfileId"] != res["profileAId"]:
+            raise AssertionError(f"activeProfileId mismatch in {label}: {actual['activeProfileId']!r}")
+
+    imported_pad_a = next((p for p in res["afterImport"]["soundPads"] if p["id"] == "pad-prof-a-intro"), None)
+    if not imported_pad_a or imported_pad_a["category"] != "group-intro" or imported_pad_a.get("hotkey") != "5":
+        raise AssertionError(f"Imported pad-prof-a-intro category/hotkey lost: {imported_pad_a!r}")
+
+    if res["stateBAfterImport"] != b1:
+        raise AssertionError("Activating Profile B after JSON import did not restore identical groups and pads")
+
+
 def main() -> int:
     checks = [
         ("1. Production build & dist/ artifacts", check_production_build),
@@ -1671,6 +2130,8 @@ def main() -> int:
         ("11. Spotify track metadata (fetchSpotifyTrackMetadata & example link)", check_spotify_track_metadata),
         ("12. AudioController.playAt() self-healing ensureReady() & failing adapter fallback", check_audio_controller_self_healing_ensure_ready),
         ("13. SpotifyPlayerService.discoverConnectDevice() & 'connect' transport resilience", check_spotify_connect_discovery_and_transport),
+        ("14. Store custom SoundboardGroup CRUD, ordering & safe pad fallback migration", check_store_custom_soundboard_groups_crud_and_migration),
+        ("15. Store MatchProfile switching & JSON round-trip with custom soundboardGroups", check_store_custom_groups_profiles_and_json_roundtrip),
     ]
 
     for label, fn in checks:

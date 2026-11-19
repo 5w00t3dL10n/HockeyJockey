@@ -9,14 +9,16 @@ import {
 } from 'lucide-react';
 import {
   DEFAULT_KEY_BINDINGS,
-  PAD_CATEGORY_LABELS,
-  SOUNDBOARD_CATEGORIES,
+  DEFAULT_SOUNDBOARD_GROUPS,
+  EVENT_PAD_CATEGORIES,
+  getPadCategoryLabel,
 } from '../data/defaults.ts';
 import type {
   AudioStateSnapshot,
   KeyBindings,
   MatchProfile,
   SavedRoster,
+  SoundboardGroup,
   SoundPad,
   Team,
 } from '../types/models.ts';
@@ -28,6 +30,7 @@ interface MatchViewProps {
     away: Team;
   };
   soundPads: SoundPad[];
+  soundboardGroups?: SoundboardGroup[];
   audioState: AudioStateSnapshot;
   keyBindings?: KeyBindings;
   savedRosters?: SavedRoster[];
@@ -43,6 +46,7 @@ interface MatchViewProps {
 export function MatchView({
   teams,
   soundPads,
+  soundboardGroups = DEFAULT_SOUNDBOARD_GROUPS,
   audioState,
   keyBindings = DEFAULT_KEY_BINDINGS,
   savedRosters = [],
@@ -58,6 +62,36 @@ export function MatchView({
   const goalAwayKey = keyBindings.actions.goalAway;
   const penaltyHomeKey = keyBindings.actions.penaltyHome;
   const penaltyAwayKey = keyBindings.actions.penaltyAway;
+
+  const eventCategorySet = new Set<string>(EVENT_PAD_CATEGORIES);
+  const orderedGroups: SoundboardGroup[] = [];
+  const seenGroupIds = new Set<string>();
+
+  for (const group of soundboardGroups) {
+    if (
+      !group.id ||
+      eventCategorySet.has(group.id) ||
+      seenGroupIds.has(group.id)
+    ) {
+      continue;
+    }
+    seenGroupIds.add(group.id);
+    orderedGroups.push(group);
+  }
+
+  for (const pad of soundPads) {
+    if (
+      pad.category &&
+      !eventCategorySet.has(pad.category) &&
+      !seenGroupIds.has(pad.category)
+    ) {
+      seenGroupIds.add(pad.category);
+      orderedGroups.push({
+        id: pad.category,
+        label: getPadCategoryLabel(pad.category, soundboardGroups),
+      });
+    }
+  }
 
   return (
     <div className="mx-auto max-w-[1600px] px-4 py-6 space-y-8">
@@ -369,18 +403,18 @@ export function MatchView({
         </div>
 
         <div className="space-y-6">
-          {SOUNDBOARD_CATEGORIES.map((category) => {
+          {orderedGroups.map((group) => {
             const padsInCategory = soundPads.filter(
-              (pad) => pad.category === category,
+              (pad) => pad.category === group.id,
             );
             if (padsInCategory.length === 0) {
               return null;
             }
 
             return (
-              <div key={category} className="space-y-2.5">
+              <div key={group.id} className="space-y-2.5">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-slate-400 border-b border-slate-800/80 pb-1.5">
-                  {PAD_CATEGORY_LABELS[category]}
+                  {group.label}
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
                   {padsInCategory.map((pad) => {

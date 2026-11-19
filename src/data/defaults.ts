@@ -1,10 +1,11 @@
 import type {
   AppSettings,
+  BuiltinPadCategory,
   KeyBindings,
   MatchActionId,
   MatchProfile,
-  PadCategory,
   SavedRoster,
+  SoundboardGroup,
   SoundPad,
   Team,
 } from '../types/models.ts';
@@ -44,7 +45,22 @@ export const DEFAULT_KEY_BINDINGS: KeyBindings = {
   pads: {},
 };
 
-export const PAD_CATEGORY_LABELS: Record<PadCategory, string> = {
+export const EVENT_PAD_CATEGORIES: BuiltinPadCategory[] = [
+  'goal_home',
+  'goal_away',
+  'penalty_home',
+  'penalty_away',
+];
+
+export const DEFAULT_SOUNDBOARD_GROUPS: SoundboardGroup[] = [
+  { id: 'faceoff_off', label: 'Tekning Anfallszon', isBuiltin: true },
+  { id: 'faceoff_def', label: 'Tekning Försvarszon', isBuiltin: true },
+  { id: 'hype', label: 'Pepp / Underläge', isBuiltin: true },
+  { id: 'organ', label: 'Orgel / Publikpepp', isBuiltin: true },
+  { id: 'misc', label: 'Timeout / Paus / Skada', isBuiltin: true },
+];
+
+export const PAD_CATEGORY_LABELS: Record<BuiltinPadCategory, string> = {
   goal_home: 'Mål Hemmalag',
   goal_away: 'Mål Bortalag / Omstart',
   penalty_home: 'Utvisning Hemmalag',
@@ -56,7 +72,7 @@ export const PAD_CATEGORY_LABELS: Record<PadCategory, string> = {
   misc: 'Timeout / Paus / Skada',
 };
 
-export const SOUNDBOARD_CATEGORIES: PadCategory[] = [
+export const SOUNDBOARD_CATEGORIES: BuiltinPadCategory[] = [
   'faceoff_off',
   'faceoff_def',
   'hype',
@@ -64,7 +80,7 @@ export const SOUNDBOARD_CATEGORIES: PadCategory[] = [
   'misc',
 ];
 
-export const ALL_PAD_CATEGORIES: PadCategory[] = [
+export const ALL_PAD_CATEGORIES: BuiltinPadCategory[] = [
   'goal_home',
   'goal_away',
   'penalty_home',
@@ -75,6 +91,22 @@ export const ALL_PAD_CATEGORIES: PadCategory[] = [
   'organ',
   'misc',
 ];
+
+export function getPadCategoryLabel(
+  categoryId: string,
+  soundboardGroups?: SoundboardGroup[],
+): string {
+  const matchedGroup = soundboardGroups?.find(
+    (group) => group.id === categoryId && group.label.trim().length > 0,
+  );
+  if (matchedGroup) {
+    return matchedGroup.label.trim();
+  }
+  if (Object.prototype.hasOwnProperty.call(PAD_CATEGORY_LABELS, categoryId)) {
+    return PAD_CATEGORY_LABELS[categoryId as BuiltinPadCategory];
+  }
+  return categoryId;
+}
 
 export const DEFAULT_TEAMS: { home: Team; away: Team } = {
   home: {
@@ -358,6 +390,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     actions: { ...DEFAULT_KEY_BINDINGS.actions },
     pads: { ...DEFAULT_KEY_BINDINGS.pads },
   },
+  soundboardGroups: DEFAULT_SOUNDBOARD_GROUPS.map((group) => ({ ...group })),
   scriptTemplates: {
     penalty:
       '{team} drar på sig en utvisning genom nummer {number}, {name}, {duration} för {reason}.',
@@ -625,6 +658,9 @@ export const DEFAULT_MATCH_PROFILES: MatchProfile[] = [
         actions: { ...DEFAULT_KEY_BINDINGS.actions },
         pads: { ...DEFAULT_KEY_BINDINGS.pads },
       },
+      soundboardGroups: DEFAULT_SOUNDBOARD_GROUPS.map((group) => ({
+        ...group,
+      })),
     },
     updatedAt: '2026-01-01T12:00:00.000Z',
   },
@@ -642,6 +678,9 @@ export const DEFAULT_MATCH_PROFILES: MatchProfile[] = [
         actions: { ...DEFAULT_KEY_BINDINGS.actions },
         pads: {},
       },
+      soundboardGroups: DEFAULT_SOUNDBOARD_GROUPS.map((group) => ({
+        ...group,
+      })),
     },
     updatedAt: '2026-01-01T12:00:00.000Z',
   },

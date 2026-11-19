@@ -7,6 +7,8 @@ import {
   DEFAULT_SETTINGS,
   DEFAULT_SOUND_PADS,
   DEFAULT_TEAMS,
+  EVENT_PAD_CATEGORIES,
+  PAD_CATEGORY_LABELS,
 } from '../data/defaults.ts';
 import type {
   AppSettings,
@@ -15,6 +17,7 @@ import type {
   MatchConfigSnapshot,
   MatchProfile,
   SavedRoster,
+  SoundboardGroup,
   SoundPad,
   Team,
   TrackCue,
@@ -27,6 +30,7 @@ import {
   sanitizeKeyBindings,
   sanitizeMatchConfig,
   sanitizeSavedRoster,
+  sanitizeSoundboardGroups,
   selectNextTrack,
   syncPadsWithKeyBindings,
 } from '../utils/domain.ts';
@@ -79,8 +83,24 @@ const safeStateStorage: StateStorage = {
   },
 };
 
+const EVENT_CATEGORY_SET = new Set<string>(EVENT_PAD_CATEGORIES);
+
 function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function createGroupSlug(label: string): string {
+  const ascii = label
+    .toLowerCase()
+    .replace(/[åä]/g, 'a')
+    .replace(/ö/g, 'o')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return ascii || 'custom';
+}
+
+function cloneSoundboardGroups(groups: SoundboardGroup[]): SoundboardGroup[] {
+  return groups.map((group) => ({ ...group }));
 }
 
 function cloneKeyBindings(kb: KeyBindings): KeyBindings {
@@ -171,6 +191,14 @@ export interface AppStoreState {
   ) => void;
   removeTrackFromPad: (padId: string, trackIndex: number) => void;
   advancePadRotation: (padId: string) => TrackCue | null;
+
+  addSoundboardGroup: (label: string, customId?: string) => string;
+  updateSoundboardGroup: (groupId: string, label: string) => void;
+  moveSoundboardGroup: (groupId: string, direction: 'up' | 'down') => void;
+  deleteSoundboardGroup: (
+    groupId: string,
+    fallbackCategoryId?: string,
+  ) => void;
 
   updateSettings: (updates: Partial<AppSettings>) => void;
   updateScriptTemplates: (
@@ -492,6 +520,150 @@ export const useAppStore = create<AppStoreState>()(
         return track;
       },
 
+      addSoundboardGroup: (label, customId) => {
+        const trimmedLabel = typeof label === 'string' ? label.trim() : '';
+        const trimmedCustomId =
+          typeof customId === 'string' ? customId.trim() : '';
+        const currentGroups = get().settings.soundboardGroups;
+
+        if (trimmedCustomId && !EVENT_CATEGORY_SET.has(trimmedCustomId)) {
+          const existingById = currentGroups.find(
+            (group) => group.id === trimmedCustomId,
+          );
+          if (existingById) {
+            return existingById.id;
+          }
+        }
+
+        if (!trimmedLabel) {
+          return '';
+        }
+
+        const existingByLabel = currentGroups.find(
+          (group) =>
+            group.label.trim().toLowerCase() === trimmedLabel.toLowerCase(),
+        );
+        if (existingByLabel) {
+          return existingByLabel.id;
+        }
+
+        const existingIds = new Set(currentGroups.map((group) => group.id));
+        let newId =
+          trimmedCustomId &&
+          !EVENT_CATEGORY_SET.has(trimmedCustomId) &&
+          !existingIds.has(trimmedCustomId)
+            ? trimmedCustomId
+            : '';
+
+        if (!newId) {
+          const slug = createGroupSlug(trimmedLabel);
+          do {
+            newId = `group-${slug}-${Math.random().toString(36).slice(2, 7)}`;
+          } while (existingIds.has(newId) || EVENT_CATEGORY_SET.has(newId));
+        }
+
+        const newGroup: SoundboardGroup = {
+          id: newId,
+          label: trimmedLabel,
+          isBuiltin: false,
+        };
+
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            soundboardGroups: [...state.settings.soundboardGroups, newGroup],
+          },
+        }));
+
+        return newId;
+      },
+
+      updateSoundboardGroup: (groupId, label) => {
+        const cleanId = typeof groupId === 'string' ? groupId.trim() : '';
+        const trimmedLabel = typeof label === 'string' ? label.trim() : '';
+        if (!cleanId || !trimmedLabel) {
+          return;
+        }
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            soundboardGroups: state.settings.soundboardGroups.map((group) =>
+              group.id === cleanId ? { ...group, label: trimmedLabel } : group,
+            ),
+          },
+        }));
+      },
+
+      moveSoundboardGroup: (groupId, direction) =>
+        set((state) => {
+          const groups = [...state.settings.soundboardGroups];
+          const currentIndex = groups.findIndex((group) => group.id === groupId);
+          if (currentIndex === -1) {
+            return state;
+          }
+          const targetIndex =
+            direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+          if (targetIndex < 0 || targetIndex >= groups.length) {
+            return state;
+          }
+          const [moved] = groups.splice(currentIndex, 1);
+          groups.splice(targetIndex, 0, moved);
+          return {
+            settings: {
+              ...state.settings,
+              soundboardGroups: groups,
+            },
+          };
+        }),
+
+      deleteSoundboardGroup: (groupId, fallbackCategoryId) =>
+        set((state) => {
+          const cleanId = typeof groupId === 'string' ? groupId.trim() : '';
+          if (!cleanId) {
+            return state;
+          }
+          let remainingGroups = state.settings.soundboardGroups.filter(
+            (group) => group.id !== cleanId,
+          );
+          if (remainingGroups.length === 0) {
+            remainingGroups = [
+              {
+                id: 'misc',
+                label: PAD_CATEGORY_LABELS.misc,
+                isBuiltin: true,
+              },
+            ];
+          }
+
+          const cleanFallback =
+            typeof fallbackCategoryId === 'string'
+              ? fallbackCategoryId.trim()
+              : '';
+          const isValidFallback =
+            cleanFallback.length > 0 &&
+            cleanFallback !== cleanId &&
+            (remainingGroups.some((group) => group.id === cleanFallback) ||
+              EVENT_CATEGORY_SET.has(cleanFallback));
+
+          const targetCategory = isValidFallback
+            ? cleanFallback
+            : (remainingGroups[0]?.id ?? 'misc');
+
+          const nextPads = state.soundPads.map((pad) =>
+            pad.category === cleanId
+              ? { ...pad, category: targetCategory }
+              : pad,
+          );
+
+          return {
+            soundPads: nextPads,
+            settings: {
+              ...state.settings,
+              soundboardGroups: remainingGroups,
+            },
+          };
+        }),
+
       updateSettings: (updates) =>
         set((state) => {
           const validPadIds = new Set(state.soundPads.map((p) => p.id));
@@ -502,10 +674,19 @@ export const useAppStore = create<AppStoreState>()(
                 validPadIds,
               )
             : state.settings.keyBindings;
+          const nextSoundboardGroups =
+            updates.soundboardGroups !== undefined
+              ? sanitizeSoundboardGroups(
+                  updates.soundboardGroups,
+                  state.settings.soundboardGroups,
+                  state.soundPads,
+                )
+              : state.settings.soundboardGroups;
           const nextSettings: AppSettings = {
             ...state.settings,
             ...updates,
             keyBindings: nextKeyBindings,
+            soundboardGroups: nextSoundboardGroups,
           };
           return {
             settings: nextSettings,
@@ -737,6 +918,9 @@ export const useAppStore = create<AppStoreState>()(
 
         const finalId = existing ? existing.id : targetId || generateId('profile');
         const clonedBindings = cloneKeyBindings(state.settings.keyBindings);
+        const clonedGroups = cloneSoundboardGroups(
+          state.settings.soundboardGroups,
+        );
         const clonedPads = syncPadsWithKeyBindings(
           cloneSoundPads(state.soundPads),
           clonedBindings,
@@ -760,6 +944,7 @@ export const useAppStore = create<AppStoreState>()(
             awayGoalSilence: state.settings.awayGoalSilence,
             scriptTemplates: { ...state.settings.scriptTemplates },
             keyBindings: clonedBindings,
+            soundboardGroups: clonedGroups,
           },
           updatedAt: now,
         };
@@ -799,6 +984,11 @@ export const useAppStore = create<AppStoreState>()(
             );
 
         const nextPads = syncPadsWithKeyBindings(rawPads, nextKeyBindings);
+        const nextSoundboardGroups = sanitizeSoundboardGroups(
+          profile.settings?.soundboardGroups,
+          state.settings.soundboardGroups,
+          nextPads,
+        );
 
         const nextSettings: AppSettings = {
           ...state.settings,
@@ -814,6 +1004,7 @@ export const useAppStore = create<AppStoreState>()(
             ? { ...profile.settings.scriptTemplates }
             : { ...state.settings.scriptTemplates },
           keyBindings: nextKeyBindings,
+          soundboardGroups: nextSoundboardGroups,
         };
 
         const shouldLoadTeams = Boolean(options?.loadTeams && profile.teams);
@@ -862,6 +1053,13 @@ export const useAppStore = create<AppStoreState>()(
                     ? {
                         keyBindings: cloneKeyBindings(
                           source.settings.keyBindings,
+                        ),
+                      }
+                    : {}),
+                  ...(source.settings.soundboardGroups
+                    ? {
+                        soundboardGroups: cloneSoundboardGroups(
+                          source.settings.soundboardGroups,
                         ),
                       }
                     : {}),

@@ -21,18 +21,21 @@ import {
   Users,
 } from 'lucide-react';
 import {
-  ALL_PAD_CATEGORIES,
+  EVENT_PAD_CATEGORIES,
   MATCH_ACTION_IDS,
   MATCH_ACTION_LABELS,
   PAD_CATEGORY_LABELS,
+  getPadCategoryLabel,
 } from '../data/defaults.ts';
 import { fetchSpotifyTrackMetadata } from '../services/spotifyMetadata.ts';
 import { useAppStore } from '../store/useAppStore.ts';
 import type {
   AppSettings,
+  BuiltinPadCategory,
   MatchActionId,
   PadCategory,
   SavedRoster,
+  SoundboardGroup,
   SoundPad,
   Team,
   TrackCue,
@@ -1203,6 +1206,366 @@ function TrackCueRow({
   );
 }
 
+interface PadCategorySelectorProps {
+  value: PadCategory;
+  onChange: (category: PadCategory) => void;
+  soundboardGroups: SoundboardGroup[];
+  onCreateGroup: (label: string) => string;
+  ariaLabel?: string;
+  selectClassName?: string;
+}
+
+function PadCategorySelector({
+  value,
+  onChange,
+  soundboardGroups,
+  onCreateGroup,
+  ariaLabel,
+  selectClassName = 'flex-1 min-w-0 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none',
+}: PadCategorySelectorProps) {
+  const [isAddingGroup, setIsAddingGroup] = useState(false);
+  const [newGroupLabel, setNewGroupLabel] = useState('');
+
+  const isKnownValue =
+    soundboardGroups.some((group) => group.id === value) ||
+    EVENT_PAD_CATEGORIES.includes(value as BuiltinPadCategory);
+
+  const handleQuickCreate = () => {
+    const trimmed = newGroupLabel.trim();
+    if (!trimmed) {
+      return;
+    }
+    const createdId = onCreateGroup(trimmed);
+    if (createdId) {
+      onChange(createdId);
+    }
+    setNewGroupLabel('');
+    setIsAddingGroup(false);
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <select
+          aria-label={ariaLabel}
+          value={value}
+          onChange={(e) => onChange(e.target.value as PadCategory)}
+          className={selectClassName}
+        >
+          {!isKnownValue && value && (
+            <option value={value}>
+              {getPadCategoryLabel(value, soundboardGroups)}
+            </option>
+          )}
+          <optgroup label="Soundboard-grupper (Snabbknappar)">
+            {soundboardGroups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.label}
+              </option>
+            ))}
+          </optgroup>
+          <optgroup label="Matchhändelser (Mål & Utvisning)">
+            {EVENT_PAD_CATEGORIES.map((cat) => (
+              <option key={cat} value={cat}>
+                {PAD_CATEGORY_LABELS[cat]}
+              </option>
+            ))}
+          </optgroup>
+        </select>
+        <button
+          type="button"
+          onClick={() => {
+            setIsAddingGroup((prev) => !prev);
+            setNewGroupLabel('');
+          }}
+          title="Skapa ny soundboard-grupp direkt"
+          className="inline-flex shrink-0 items-center rounded-xl border border-blue-500/40 bg-blue-950/50 px-2.5 py-2 text-xs font-bold text-blue-200 hover:bg-blue-900/60 cursor-pointer"
+        >
+          + Ny grupp
+        </button>
+      </div>
+
+      {isAddingGroup && (
+        <div className="flex items-center gap-1.5">
+          <input
+            type="text"
+            value={newGroupLabel}
+            onChange={(e) => setNewGroupLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleQuickCreate();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setIsAddingGroup(false);
+                setNewGroupLabel('');
+              }
+            }}
+            placeholder="Namn på ny grupp..."
+            autoFocus
+            className="flex-1 min-w-0 rounded-lg border border-blue-500/50 bg-slate-950 px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 focus:border-blue-400 focus:outline-none"
+          />
+          <button
+            type="button"
+            disabled={!newGroupLabel.trim()}
+            onClick={handleQuickCreate}
+            className="shrink-0 rounded-lg bg-blue-600 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-blue-500 disabled:opacity-40 cursor-pointer"
+          >
+            Skapa
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setIsAddingGroup(false);
+              setNewGroupLabel('');
+            }}
+            className="shrink-0 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-700 cursor-pointer"
+          >
+            Avbryt
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface SoundboardGroupRowProps {
+  group: SoundboardGroup;
+  index: number;
+  total: number;
+  padCount: number;
+  disableDelete: boolean;
+  onRename: (label: string) => void;
+  onMove: (direction: 'up' | 'down') => void;
+  onDelete: () => void;
+}
+
+function SoundboardGroupRow({
+  group,
+  index,
+  total,
+  padCount,
+  disableDelete,
+  onRename,
+  onMove,
+  onDelete,
+}: SoundboardGroupRowProps) {
+  const [draftLabel, setDraftLabel] = useState(group.label);
+  const isFocusedRef = useRef(false);
+
+  useEffect(() => {
+    if (!isFocusedRef.current) {
+      setDraftLabel(group.label);
+    }
+  }, [group.label]);
+
+  const handleLabelChange = (raw: string) => {
+    setDraftLabel(raw);
+    if (raw.trim()) {
+      onRename(raw.trim());
+    }
+  };
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-slate-800 bg-slate-950/90 px-3.5 py-2.5">
+      <div className="flex flex-1 min-w-[200px] items-center gap-2.5">
+        <input
+          type="text"
+          aria-label={`Gruppnamn för ${group.label}`}
+          value={draftLabel}
+          onFocus={() => {
+            isFocusedRef.current = true;
+          }}
+          onChange={(e) => handleLabelChange(e.target.value)}
+          onBlur={() => {
+            isFocusedRef.current = false;
+            const trimmed = draftLabel.trim();
+            if (!trimmed) {
+              setDraftLabel(group.label);
+            } else {
+              setDraftLabel(trimmed);
+            }
+          }}
+          className="flex-1 min-w-[140px] rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white focus:border-blue-500 focus:outline-none"
+        />
+        <span className="shrink-0 rounded-full bg-slate-800 px-2.5 py-0.5 text-xs font-semibold text-slate-300">
+          {padCount} {padCount === 1 ? 'knapp' : 'knappar'}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          disabled={index === 0}
+          onClick={() => onMove('up')}
+          aria-label={`Flytta grupp ${group.label} upp`}
+          className="rounded-lg border border-slate-700 bg-slate-800 p-1.5 text-slate-200 hover:bg-slate-700 disabled:opacity-35 cursor-pointer"
+        >
+          <ArrowUp className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          disabled={index === total - 1}
+          onClick={() => onMove('down')}
+          aria-label={`Flytta grupp ${group.label} ned`}
+          className="rounded-lg border border-slate-700 bg-slate-800 p-1.5 text-slate-200 hover:bg-slate-700 disabled:opacity-35 cursor-pointer"
+        >
+          <ArrowDown className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          disabled={disableDelete}
+          onClick={onDelete}
+          aria-label={`Ta bort grupp ${group.label}`}
+          title={
+            disableDelete
+              ? 'Minst en grupp måste finnas kvar'
+              : padCount > 0
+                ? 'Tar bort gruppen och flyttar knapparna till en annan grupp'
+                : 'Ta bort grupp'
+          }
+          className="inline-flex items-center gap-1 rounded-lg border border-red-900/60 bg-red-950/40 px-2.5 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-900/50 disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          Ta bort
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SoundboardGroupsSection() {
+  const soundboardGroups = useAppStore((s) => s.settings.soundboardGroups);
+  const soundPads = useAppStore((s) => s.soundPads);
+  const addSoundboardGroup = useAppStore((s) => s.addSoundboardGroup);
+  const updateSoundboardGroup = useAppStore((s) => s.updateSoundboardGroup);
+  const moveSoundboardGroup = useAppStore((s) => s.moveSoundboardGroup);
+  const deleteSoundboardGroup = useAppStore((s) => s.deleteSoundboardGroup);
+
+  const [newGroupLabel, setNewGroupLabel] = useState('');
+  const [groupFeedback, setGroupFeedback] = useState<string | null>(null);
+
+  const handleCreateGroup = () => {
+    const trimmed = newGroupLabel.trim();
+    if (!trimmed) {
+      return;
+    }
+    const alreadyExists = soundboardGroups.some(
+      (g) => g.label.trim().toLowerCase() === trimmed.toLowerCase(),
+    );
+    addSoundboardGroup(trimmed);
+    setNewGroupLabel('');
+    setGroupFeedback(
+      alreadyExists
+        ? `Gruppen "${trimmed}" finns redan.`
+        : `Skapade gruppen "${trimmed}".`,
+    );
+  };
+
+  const handleDeleteGroup = (group: SoundboardGroup) => {
+    const padCount = soundPads.filter((p) => p.category === group.id).length;
+    const remaining = soundboardGroups.filter((g) => g.id !== group.id);
+    const targetLabel =
+      remaining[0]?.label ?? PAD_CATEGORY_LABELS.misc;
+
+    deleteSoundboardGroup(group.id);
+    if (padCount > 0) {
+      setGroupFeedback(
+        `Tog bort gruppen "${group.label}" och flyttade ${padCount} ${
+          padCount === 1 ? 'knapp' : 'knappar'
+        } till "${targetLabel}".`,
+      );
+    } else {
+      setGroupFeedback(`Tog bort gruppen "${group.label}".`);
+    }
+  };
+
+  return (
+    <section
+      aria-labelledby="soundboard-groups-heading"
+      className="rounded-2xl border border-slate-800 bg-slate-900 p-5 space-y-4"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3
+            id="soundboard-groups-heading"
+            className="text-sm font-bold uppercase tracking-wider text-slate-300"
+          >
+            Grupper för Snabbknappar (Soundboard-kategorier)
+          </h3>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Skapa egna kategorier (t.ex. Intro, Uppvärmning, Periodpaus), byt
+            namn och ändra ordningen som visas i Matchläge.
+          </p>
+        </div>
+        <span className="rounded-full bg-slate-800 px-3 py-1 text-xs font-bold text-slate-300">
+          {soundboardGroups.length} grupper
+        </span>
+      </div>
+
+      <div className="flex flex-wrap sm:flex-nowrap gap-2">
+        <input
+          type="text"
+          value={newGroupLabel}
+          onChange={(e) => setNewGroupLabel(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              handleCreateGroup();
+            }
+          }}
+          placeholder="Namn på ny grupp (t.ex. Intro, Uppvärmning, Periodpaus)"
+          className="flex-1 min-w-[200px] rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
+        />
+        <button
+          type="button"
+          disabled={!newGroupLabel.trim()}
+          onClick={handleCreateGroup}
+          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-500 disabled:opacity-40 cursor-pointer"
+        >
+          + Skapa grupp
+        </button>
+      </div>
+
+      {groupFeedback && (
+        <div className="flex items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/40 px-3.5 py-2 text-xs font-semibold text-emerald-300">
+          <span>{groupFeedback}</span>
+          <button
+            type="button"
+            onClick={() => setGroupFeedback(null)}
+            className="text-emerald-200 hover:underline cursor-pointer"
+          >
+            Stäng
+          </button>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {soundboardGroups.map((group, idx) => {
+          const padCount = soundPads.filter(
+            (pad) => pad.category === group.id,
+          ).length;
+          const isOnlyMisc =
+            soundboardGroups.length <= 1 && group.id === 'misc';
+          return (
+            <SoundboardGroupRow
+              key={group.id}
+              group={group}
+              index={idx}
+              total={soundboardGroups.length}
+              padCount={padCount}
+              disableDelete={isOnlyMisc}
+              onRename={(label) => updateSoundboardGroup(group.id, label)}
+              onMove={(direction) => moveSoundboardGroup(group.id, direction)}
+              onDelete={() => handleDeleteGroup(group)}
+            />
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 interface SoundPadEditorProps {
   pad: SoundPad;
   index: number;
@@ -1228,6 +1591,8 @@ function SoundPadEditor({
   const removeTrackFromPad = useAppStore((s) => s.removeTrackFromPad);
   const setPadHotkey = useAppStore((s) => s.setPadHotkey);
   const spotifyClientId = useAppStore((s) => s.settings.spotifyClientId);
+  const soundboardGroups = useAppStore((s) => s.settings.soundboardGroups);
+  const addSoundboardGroup = useAppStore((s) => s.addSoundboardGroup);
 
   const [newUrl, setNewUrl] = useState('');
   const [newTitle, setNewTitle] = useState('');
@@ -1360,7 +1725,7 @@ function SoundPadEditor({
           <Music className="h-5 w-5 text-blue-400" />
           <h4 className="text-base font-extrabold text-white">{pad.label}</h4>
           <span className="rounded-full bg-slate-800 px-2.5 py-0.5 text-xs font-semibold text-slate-300">
-            {PAD_CATEGORY_LABELS[pad.category]}
+            {getPadCategoryLabel(pad.category, soundboardGroups)}
           </span>
         </div>
 
@@ -1412,21 +1777,14 @@ function SoundPadEditor({
           <label className="block text-[11px] font-bold uppercase text-slate-400 mb-1">
             Kategori
           </label>
-          <select
+          <PadCategorySelector
+            ariaLabel={`Kategori för ${pad.label}`}
             value={pad.category}
-            onChange={(e) =>
-              updateSoundPad(pad.id, {
-                category: e.target.value as PadCategory,
-              })
-            }
-            className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
-          >
-            {ALL_PAD_CATEGORIES.map((cat) => (
-              <option key={cat} value={cat}>
-                {PAD_CATEGORY_LABELS[cat]}
-              </option>
-            ))}
-          </select>
+            onChange={(category) => updateSoundPad(pad.id, { category })}
+            soundboardGroups={soundboardGroups}
+            onCreateGroup={addSoundboardGroup}
+            selectClassName="flex-1 min-w-0 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+          />
         </div>
 
         <div>
@@ -1735,7 +2093,10 @@ function KeyBindingsSection() {
                         {pad.label}
                       </div>
                       <div className="text-[11px] text-slate-500">
-                        {PAD_CATEGORY_LABELS[pad.category]}
+                        {getPadCategoryLabel(
+                          pad.category,
+                          settings.soundboardGroups,
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1767,6 +2128,7 @@ export function SetupView({ onPreviewTrack, onStopAudio }: SetupViewProps) {
   const activeProfileId = useAppStore((s) => s.activeProfileId);
 
   const addSoundPad = useAppStore((s) => s.addSoundPad);
+  const addSoundboardGroup = useAppStore((s) => s.addSoundboardGroup);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const updateScriptTemplates = useAppStore((s) => s.updateScriptTemplates);
   const exportConfigJson = useAppStore((s) => s.exportConfigJson);
@@ -1774,9 +2136,19 @@ export function SetupView({ onPreviewTrack, onStopAudio }: SetupViewProps) {
   const resetToDefaults = useAppStore((s) => s.resetToDefaults);
 
   const [newPadLabel, setNewPadLabel] = useState('');
-  const [newPadCategory, setNewPadCategory] =
-    useState<PadCategory>('faceoff_off');
+  const [newPadCategory, setNewPadCategory] = useState<PadCategory>(
+    () => settings.soundboardGroups[0]?.id ?? 'faceoff_off',
+  );
   const [newPadColor, setNewPadColor] = useState('#2563eb');
+
+  useEffect(() => {
+    const isValid =
+      settings.soundboardGroups.some((g) => g.id === newPadCategory) ||
+      EVENT_PAD_CATEGORIES.includes(newPadCategory as BuiltinPadCategory);
+    if (!isValid) {
+      setNewPadCategory(settings.soundboardGroups[0]?.id ?? 'misc');
+    }
+  }, [settings.soundboardGroups, newPadCategory]);
 
   const [backupFeedback, setBackupFeedback] = useState<{
     type: 'success' | 'error';
@@ -1942,12 +2314,15 @@ export function SetupView({ onPreviewTrack, onStopAudio }: SetupViewProps) {
       {/* TAB 3: SOUNDBOARD CONFIG */}
       {activeTab === 'soundboard' && (
         <div className="space-y-6">
+          {/* Soundboard Groups Manager */}
+          <SoundboardGroupsSection />
+
           {/* New Pad Creator */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 space-y-3">
             <h3 className="text-sm font-bold uppercase tracking-wider text-slate-300">
               Skapa ny soundboard-knapp
             </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1fr_auto_auto] gap-3 items-center">
+            <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1fr_auto_auto] gap-3 items-start">
               <input
                 type="text"
                 value={newPadLabel}
@@ -1955,19 +2330,14 @@ export function SetupView({ onPreviewTrack, onStopAudio }: SetupViewProps) {
                 placeholder="Namn på knapp (t.ex. Tekning Powerplay)"
                 className="rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
               />
-              <select
+              <PadCategorySelector
+                ariaLabel="Kategori för ny soundboard-knapp"
                 value={newPadCategory}
-                onChange={(e) =>
-                  setNewPadCategory(e.target.value as PadCategory)
-                }
-                className="rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none"
-              >
-                {ALL_PAD_CATEGORIES.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {PAD_CATEGORY_LABELS[cat]}
-                  </option>
-                ))}
-              </select>
+                onChange={setNewPadCategory}
+                soundboardGroups={settings.soundboardGroups}
+                onCreateGroup={addSoundboardGroup}
+                selectClassName="flex-1 min-w-0 rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none"
+              />
               <input
                 type="color"
                 value={newPadColor}

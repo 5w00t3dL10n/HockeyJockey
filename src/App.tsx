@@ -368,6 +368,7 @@ export function App() {
           <MatchView
             teams={teams}
             soundPads={soundPads}
+            soundboardGroups={settings.soundboardGroups}
             audioState={audioState}
             keyBindings={settings.keyBindings}
             savedRosters={savedRosters}

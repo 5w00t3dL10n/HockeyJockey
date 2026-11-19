@@ -1060,6 +1060,321 @@ console.log(JSON.stringify({
         self.assertIs(res["profileFalseSetting"], False)
         self.assertIs(res["profileTrueSetting"], True)
 
+    def test_13_sanitize_soundboard_groups_custom_exclusions_and_dedup(self) -> None:
+        """Verify sanitizeSoundboardGroups handles custom groups, event-category exclusion, deduplication, fallbacks, and label resolution."""
+        script = """
+import {
+  DEFAULT_SOUNDBOARD_GROUPS,
+  PAD_CATEGORY_LABELS,
+  getPadCategoryLabel,
+} from './src/data/defaults.ts';
+import { sanitizeSoundboardGroups } from './src/utils/domain.ts';
+
+const customAndEventMixed = sanitizeSoundboardGroups([
+  { id: '  group-intro  ', label: '  Intro & Uppvärmning  ', isBuiltin: false },
+  { id: 'goal_home', label: 'Otillåten Mål Hemma' },
+  { id: 'goal_away', label: 'Otillåten Mål Borta' },
+  { id: 'penalty_home', label: 'Otillåten Utv Hemma' },
+  { id: 'penalty_away', label: 'Otillåten Utv Borta' },
+  { id: 'group-intro', label: 'Dubblett som ska ignoreras', isBuiltin: false },
+  { id: 'hype', label: 'Pepp & Tryck' },
+  { id: 'hype', label: 'Dubblett Hype' },
+  { id: '', label: 'Tomt ID' },
+  { id: 'group-no-label', label: '   ' },
+  null,
+  'invalid-entry',
+]);
+
+const fallbackUsedWhenEmpty = sanitizeSoundboardGroups(
+  [
+    { id: 'goal_home', label: 'Bara Händelsekategori' },
+    { id: '', label: 'Ogiltig' },
+  ],
+  [
+    { id: 'group-custom-fb', label: 'Fallback Grupp', isBuiltin: false },
+    { id: 'penalty_away', label: 'Bortfiltrerad Fallback' },
+  ],
+);
+
+const defaultsUsedWhenBothEmpty = sanitizeSoundboardGroups([], []);
+
+const labelCustom = getPadCategoryLabel('group-intro', customAndEventMixed);
+const labelOverriddenBuiltin = getPadCategoryLabel('hype', customAndEventMixed);
+const labelDefaultFallback = getPadCategoryLabel('organ', customAndEventMixed);
+const labelUnknown = getPadCategoryLabel('unknown-group-id', customAndEventMixed);
+
+console.log(JSON.stringify({
+  customAndEventMixed,
+  fallbackUsedWhenEmpty,
+  defaultsUsedWhenBothEmpty,
+  defaultGroups: DEFAULT_SOUNDBOARD_GROUPS,
+  hypeDefaultLabel: PAD_CATEGORY_LABELS.hype,
+  labelCustom,
+  labelOverriddenBuiltin,
+  labelDefaultFallback,
+  labelUnknown,
+}));
+"""
+        res = run_ts_script(script)
+        self.assertEqual(
+            res["customAndEventMixed"],
+            [
+                {"id": "group-intro", "label": "Intro & Uppvärmning", "isBuiltin": False},
+                {"id": "hype", "label": "Pepp & Tryck", "isBuiltin": True},
+            ],
+        )
+        self.assertEqual(
+            res["fallbackUsedWhenEmpty"],
+            [
+                {"id": "group-custom-fb", "label": "Fallback Grupp", "isBuiltin": False},
+            ],
+        )
+        self.assertEqual(res["defaultsUsedWhenBothEmpty"], res["defaultGroups"])
+        self.assertEqual(res["labelCustom"], "Intro & Uppvärmning")
+        self.assertEqual(res["labelOverriddenBuiltin"], "Pepp & Tryck")
+        self.assertEqual(res["labelDefaultFallback"], "Orgel / Publikpepp")
+        self.assertEqual(res["labelUnknown"], "unknown-group-id")
+
+    def test_14_sanitize_match_config_custom_groups_pads_and_self_healing(self) -> None:
+        """Verify sanitizeMatchConfig & sanitizeMatchProfile preserve custom pad categories, exclude event categories, deduplicate, and self-heal unknown pad categories."""
+        script = """
+import { DEFAULT_SOUNDBOARD_GROUPS, PAD_CATEGORY_LABELS } from './src/data/defaults.ts';
+import { sanitizeMatchConfig, sanitizeMatchProfile, sanitizeSoundboardGroups } from './src/utils/domain.ts';
+
+// 1. Direct sanitizeSoundboardGroups self-healing with unknown custom & omitted builtin categories, ignoring event categories and duplicates
+const selfHealedDirect = sanitizeSoundboardGroups(
+  [
+    { id: 'group-intro', label: 'Intro & Uppvärmning', isBuiltin: false },
+    { id: 'goal_home', label: 'Bortfiltrerad' },
+  ],
+  undefined,
+  [
+    {
+      id: 'pad-1',
+      label: 'Intro Låt',
+      category: 'group-intro',
+      color: '#2563eb',
+      tracks: [],
+    },
+    {
+      id: 'pad-2',
+      label: 'Uppvärmnings-jingle',
+      category: 'custom-warmup-pool',
+      color: '#059669',
+      tracks: [],
+    },
+    {
+      id: 'pad-3',
+      label: 'Uppvärmning 2 (samma okända kategori)',
+      category: 'custom-warmup-pool',
+      color: '#059669',
+      tracks: [],
+    },
+    {
+      id: 'pad-4',
+      label: 'Orgel utan grupp i rawGroups',
+      category: 'organ',
+      color: '#d97706',
+      tracks: [],
+    },
+    {
+      id: 'pad-event-goal',
+      label: 'Mållåt',
+      category: 'goal_home',
+      color: '#2563eb',
+      tracks: [],
+    },
+    {
+      id: 'pad-event-pen-away',
+      label: 'Powerplay',
+      category: 'penalty_away',
+      color: '#dc2626',
+      tracks: [],
+    },
+  ],
+);
+
+// 2. Full sanitizeMatchConfig with custom groups, custom pad categories, event-category exclusions, duplicate group IDs, and self-healing pad
+const rawConfig = {
+  version: 1,
+  soundPads: [
+    {
+      id: 'pad-custom-intro',
+      label: 'Entré',
+      category: '  group-intro  ',
+      color: '#1d4ed8',
+      volume: 0.9,
+      triggerFlow: null,
+      tracks: [
+        {
+          trackUri: 'spotify:track:4uLU6hMCjMI75M1A2tKUQC',
+          title: 'Intro Song',
+          artist: 'Arena',
+          startTimeMs: 0,
+        },
+      ],
+    },
+    {
+      id: 'pad-unregistered-custom',
+      label: 'Pausquiz',
+      category: 'crowd_chant',
+      color: '#0ea5e9',
+      volume: 1.0,
+      triggerFlow: null,
+      tracks: [],
+    },
+    {
+      id: 'pad-empty-category',
+      label: 'Saknar kategori',
+      category: '   ',
+      color: '#334155',
+      volume: 1.0,
+      triggerFlow: null,
+      tracks: [],
+    },
+    {
+      id: 'pad-goal-away',
+      label: 'Bortamål',
+      category: 'goal_away',
+      color: '#ea580c',
+      volume: 1.0,
+      triggerFlow: 'goal_away',
+      tracks: [],
+    },
+    {
+      id: 'pad-penalty-home',
+      label: 'Boxplay',
+      category: 'penalty_home',
+      color: '#1d4ed8',
+      volume: 1.0,
+      triggerFlow: 'penalty_home',
+      tracks: [],
+    },
+  ],
+  settings: {
+    soundboardGroups: [
+      { id: 'group-intro', label: 'Intro & Uppvärmning', isBuiltin: false },
+      { id: 'group-intro', label: 'Dubblett Intro', isBuiltin: false },
+      { id: 'goal_home', label: 'Får ej synas' },
+      { id: 'goal_away', label: 'Får ej synas' },
+      { id: 'penalty_home', label: 'Får ej synas' },
+      { id: 'penalty_away', label: 'Får ej synas' },
+      { id: 'misc', label: 'Övrigt / Paus', isBuiltin: true },
+    ],
+  },
+  matchProfiles: [
+    {
+      id: 'prof-custom-groups',
+      name: 'Profil med egna grupper',
+      soundPads: [
+        {
+          id: 'prof-pad-1',
+          label: 'Profil-knapp',
+          category: 'group-intro',
+          color: '#2563eb',
+          tracks: [],
+        },
+        {
+          id: 'prof-pad-healed',
+          label: 'Självläkt profilknapp',
+          category: 'intermission-show',
+          color: '#059669',
+          tracks: [],
+        },
+      ],
+      settings: {
+        soundboardGroups: [
+          { id: 'group-intro', label: 'Intro & Uppvärmning', isBuiltin: false },
+          { id: 'penalty_home', label: 'Exkluderas i profil' },
+        ],
+      },
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    },
+  ],
+};
+
+const sanitizedConfig = sanitizeMatchConfig(rawConfig);
+
+// 3. Legacy snapshot without settings.soundboardGroups but with a custom pad category
+const legacyWithCustomPad = sanitizeMatchConfig({
+  version: 1,
+  soundPads: [
+    {
+      id: 'legacy-custom-pad',
+      label: 'Legacy Custom',
+      category: 'period-break-mix',
+      color: '#475569',
+      tracks: [],
+    },
+  ],
+});
+
+const directProfile = sanitizeMatchProfile(rawConfig.matchProfiles[0]);
+
+console.log(JSON.stringify({
+  selfHealedDirect,
+  sanitizedConfig,
+  legacyWithCustomPadGroups: legacyWithCustomPad.settings.soundboardGroups,
+  legacyCustomPadCategory: legacyWithCustomPad.soundPads[0].category,
+  directProfile,
+  defaultGroupsCount: DEFAULT_SOUNDBOARD_GROUPS.length,
+  organBuiltinLabel: PAD_CATEGORY_LABELS.organ,
+}));
+"""
+        res = run_ts_script(script)
+
+        self.assertEqual(
+            res["selfHealedDirect"],
+            [
+                {"id": "group-intro", "label": "Intro & Uppvärmning", "isBuiltin": False},
+                {"id": "custom-warmup-pool", "label": "Custom Warmup Pool"},
+                {"id": "organ", "label": res["organBuiltinLabel"], "isBuiltin": True},
+            ],
+        )
+
+        cfg = res["sanitizedConfig"]
+        pads_by_id = {pad["id"]: pad for pad in cfg["soundPads"]}
+        self.assertEqual(pads_by_id["pad-custom-intro"]["category"], "group-intro")
+        self.assertEqual(pads_by_id["pad-unregistered-custom"]["category"], "crowd_chant")
+        self.assertEqual(pads_by_id["pad-empty-category"]["category"], "misc")
+        self.assertEqual(pads_by_id["pad-goal-away"]["category"], "goal_away")
+        self.assertEqual(pads_by_id["pad-penalty-home"]["category"], "penalty_home")
+
+        groups = cfg["settings"]["soundboardGroups"]
+        self.assertEqual(
+            groups,
+            [
+                {"id": "group-intro", "label": "Intro & Uppvärmning", "isBuiltin": False},
+                {"id": "misc", "label": "Övrigt / Paus", "isBuiltin": True},
+                {"id": "crowd_chant", "label": "Crowd Chant"},
+            ],
+        )
+
+        group_ids = [g["id"] for g in groups]
+        self.assertEqual(len(group_ids), len(set(group_ids)))
+        for event_cat in ("goal_home", "goal_away", "penalty_home", "penalty_away"):
+            self.assertNotIn(event_cat, group_ids)
+
+        prof = cfg["matchProfiles"][0]
+        self.assertEqual(
+            prof["settings"]["soundboardGroups"],
+            [
+                {"id": "group-intro", "label": "Intro & Uppvärmning", "isBuiltin": False},
+                {"id": "intermission-show", "label": "Intermission Show"},
+            ],
+        )
+        self.assertEqual(prof["soundPads"][0]["category"], "group-intro")
+        self.assertEqual(prof["soundPads"][1]["category"], "intermission-show")
+        self.assertEqual(res["directProfile"], prof)
+
+        legacy_groups = res["legacyWithCustomPadGroups"]
+        self.assertEqual(len(legacy_groups), res["defaultGroupsCount"] + 1)
+        self.assertEqual(
+            legacy_groups[-1],
+            {"id": "period-break-mix", "label": "Period Break Mix"},
+        )
+        self.assertEqual(res["legacyCustomPadCategory"], "period-break-mix")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

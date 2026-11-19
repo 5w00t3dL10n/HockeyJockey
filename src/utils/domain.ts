@@ -1,22 +1,26 @@
 import {
-  ALL_PAD_CATEGORIES,
   DEFAULT_KEY_BINDINGS,
   DEFAULT_MATCH_PROFILES,
   DEFAULT_SAVED_ROSTERS,
   DEFAULT_SETTINGS,
+  DEFAULT_SOUNDBOARD_GROUPS,
   DEFAULT_SOUND_PADS,
   DEFAULT_SPOTIFY_CLIENT_ID,
   DEFAULT_TEAMS,
+  EVENT_PAD_CATEGORIES,
   MATCH_ACTION_IDS,
+  PAD_CATEGORY_LABELS,
 } from '../data/defaults.ts';
 import type {
   AppSettings,
+  BuiltinPadCategory,
   KeyBindings,
   MatchActionId,
   MatchConfigSnapshot,
   MatchProfile,
   PadCategory,
   SavedRoster,
+  SoundboardGroup,
   SoundPad,
   Team,
   TrackCue,
@@ -31,7 +35,10 @@ const HEX_COLOR_REGEX = /^#[0-9a-fA-F]{6}$/;
 const PKCE_CHARSET =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
 
-const VALID_CATEGORIES = new Set<PadCategory>(ALL_PAD_CATEGORIES);
+const EVENT_CATEGORY_SET = new Set<string>(EVENT_PAD_CATEGORIES);
+const BUILTIN_GROUP_ID_SET = new Set<string>(
+  DEFAULT_SOUNDBOARD_GROUPS.map((group) => group.id),
+);
 const VALID_TRIGGER_FLOWS = new Set([
   'penalty_home',
   'penalty_away',
@@ -88,6 +95,10 @@ function cloneSavedRoster(roster: SavedRoster): SavedRoster {
   };
 }
 
+function cloneSoundboardGroups(groups: SoundboardGroup[]): SoundboardGroup[] {
+  return groups.map((group) => ({ ...group }));
+}
+
 function cloneMatchProfile(profile: MatchProfile): MatchProfile {
   return {
     ...profile,
@@ -116,6 +127,13 @@ function cloneMatchProfile(profile: MatchProfile): MatchProfile {
             ...(profile.settings.keyBindings
               ? { keyBindings: cloneKeyBindings(profile.settings.keyBindings) }
               : {}),
+            ...(profile.settings.soundboardGroups
+              ? {
+                  soundboardGroups: cloneSoundboardGroups(
+                    profile.settings.soundboardGroups,
+                  ),
+                }
+              : {}),
           },
         }
       : {}),
@@ -127,6 +145,7 @@ function cloneDefaultSnapshot(): MatchConfigSnapshot {
     ...DEFAULT_SETTINGS,
     spotifyClientId: DEFAULT_SETTINGS.spotifyClientId || DEFAULT_SPOTIFY_CLIENT_ID,
     keyBindings: cloneKeyBindings(DEFAULT_KEY_BINDINGS),
+    soundboardGroups: cloneSoundboardGroups(DEFAULT_SOUNDBOARD_GROUPS),
     scriptTemplates: { ...DEFAULT_SETTINGS.scriptTemplates },
   };
 
@@ -1281,6 +1300,101 @@ function sanitizeTrackCue(rawTrack: unknown): TrackCue | null {
   };
 }
 
+function formatGroupLabelFromId(groupId: string): string {
+  const words = groupId
+    .split(/[-_\s]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1));
+  return words.length > 0 ? words.join(' ') : groupId;
+}
+
+function normalizeSoundboardGroupList(rawList: unknown): SoundboardGroup[] {
+  if (!Array.isArray(rawList)) {
+    return [];
+  }
+  const seenIds = new Set<string>();
+  const normalized: SoundboardGroup[] = [];
+
+  for (const item of rawList) {
+    if (!isPlainObject(item)) {
+      continue;
+    }
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    const label = typeof item.label === 'string' ? item.label.trim() : '';
+    if (!id || !label || EVENT_CATEGORY_SET.has(id) || seenIds.has(id)) {
+      continue;
+    }
+    seenIds.add(id);
+    const isBuiltin =
+      typeof item.isBuiltin === 'boolean'
+        ? item.isBuiltin
+        : BUILTIN_GROUP_ID_SET.has(id)
+          ? true
+          : undefined;
+    normalized.push({
+      id,
+      label,
+      ...(isBuiltin !== undefined ? { isBuiltin } : {}),
+    });
+  }
+
+  return normalized;
+}
+
+export function sanitizeSoundboardGroups(
+  rawGroups: unknown,
+  fallback?: SoundboardGroup[],
+  soundPads?: SoundPad[],
+): SoundboardGroup[] {
+  const fromRaw =
+    Array.isArray(rawGroups) && rawGroups.length > 0
+      ? normalizeSoundboardGroupList(rawGroups)
+      : [];
+
+  let groups = fromRaw;
+  if (groups.length === 0) {
+    const fromFallback =
+      Array.isArray(fallback) && fallback.length > 0
+        ? normalizeSoundboardGroupList(fallback)
+        : [];
+    groups =
+      fromFallback.length > 0
+        ? fromFallback
+        : cloneSoundboardGroups(DEFAULT_SOUNDBOARD_GROUPS);
+  }
+
+  if (Array.isArray(soundPads)) {
+    const seenIds = new Set(groups.map((group) => group.id));
+    for (const pad of soundPads) {
+      const categoryId =
+        typeof pad?.category === 'string' ? pad.category.trim() : '';
+      if (
+        !categoryId ||
+        EVENT_CATEGORY_SET.has(categoryId) ||
+        seenIds.has(categoryId)
+      ) {
+        continue;
+      }
+      seenIds.add(categoryId);
+      const isBuiltin = Object.prototype.hasOwnProperty.call(
+        PAD_CATEGORY_LABELS,
+        categoryId,
+      );
+      const label = isBuiltin
+        ? PAD_CATEGORY_LABELS[categoryId as BuiltinPadCategory]
+        : formatGroupLabelFromId(categoryId);
+      groups.push({
+        id: categoryId,
+        label,
+        ...(isBuiltin ? { isBuiltin: true } : {}),
+      });
+    }
+  }
+
+  return groups;
+}
+
 function sanitizeSoundPads(
   rawPads: unknown,
   fallback: SoundPad[],
@@ -1303,11 +1417,9 @@ function sanitizeSoundPads(
       typeof rawPad.label === 'string' && rawPad.label.trim()
         ? rawPad.label.trim()
         : `Ljudknapp ${index + 1}`;
-    const category =
-      typeof rawPad.category === 'string' &&
-      VALID_CATEGORIES.has(rawPad.category as PadCategory)
-        ? (rawPad.category as PadCategory)
-        : 'misc';
+    const rawCategory =
+      typeof rawPad.category === 'string' ? rawPad.category.trim() : '';
+    const category: PadCategory = rawCategory || 'misc';
     const color =
       typeof rawPad.color === 'string' && HEX_COLOR_REGEX.test(rawPad.color.trim())
         ? rawPad.color.trim()
@@ -1365,6 +1477,7 @@ function sanitizeSettings(
   rawSettings: unknown,
   fallback: AppSettings,
   validPadIds?: Set<string>,
+  soundPads?: SoundPad[],
 ): AppSettings {
   const defaultClientId = fallback.spotifyClientId || DEFAULT_SPOTIFY_CLIENT_ID;
   const fallbackAwayGoalSilence =
@@ -1381,6 +1494,11 @@ function sanitizeSettings(
         undefined,
         fallback.keyBindings,
         validPadIds,
+      ),
+      soundboardGroups: sanitizeSoundboardGroups(
+        undefined,
+        fallback.soundboardGroups,
+        soundPads,
       ),
       scriptTemplates: { ...fallback.scriptTemplates },
     };
@@ -1424,6 +1542,11 @@ function sanitizeSettings(
       rawSettings.keyBindings,
       fallback.keyBindings,
       validPadIds,
+    ),
+    soundboardGroups: sanitizeSoundboardGroups(
+      rawSettings.soundboardGroups,
+      fallback.soundboardGroups,
+      soundPads,
     ),
     scriptTemplates: {
       penalty:
@@ -1601,6 +1724,14 @@ export function sanitizeMatchProfile(
       );
     }
 
+    if (rawSettings.soundboardGroups !== undefined) {
+      sanitizedSettings.soundboardGroups = sanitizeSoundboardGroups(
+        rawSettings.soundboardGroups,
+        DEFAULT_SOUNDBOARD_GROUPS,
+        soundPads,
+      );
+    }
+
     settings = sanitizedSettings;
   }
 
@@ -1636,7 +1767,12 @@ export function sanitizeMatchConfig(
   const rawSanitizedPads = sanitizeSoundPads(source.soundPads, base.soundPads);
   const validPadIds = new Set(rawSanitizedPads.map((pad) => pad.id));
 
-  let settings = sanitizeSettings(source.settings, base.settings, validPadIds);
+  let settings = sanitizeSettings(
+    source.settings,
+    base.settings,
+    validPadIds,
+    rawSanitizedPads,
+  );
 
   // If legacy/imported snapshot had no explicit keyBindings, adopt any valid pad.hotkey
   const hasExplicitKeyBindings =

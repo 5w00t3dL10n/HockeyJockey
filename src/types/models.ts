@@ -17,7 +17,7 @@ export interface TrackCue {
   startTimeMs: number;
 }
 
-export type PadCategory =
+export type BuiltinPadCategory =
   | 'goal_home'
   | 'goal_away'
   | 'penalty_home'
@@ -27,6 +27,14 @@ export type PadCategory =
   | 'hype'
   | 'organ'
   | 'misc';
+
+export type PadCategory = BuiltinPadCategory | (string & {});
+
+export interface SoundboardGroup {
+  id: string;
+  label: string;
+  isBuiltin?: boolean;
+}
 
 export type MatchActionId =
   | 'fadeOut'
@@ -68,6 +76,7 @@ export interface AppSettings {
   spotifyClientId: string;
   spotifyRedirectUri: string;
   keyBindings: KeyBindings;
+  soundboardGroups: SoundboardGroup[];
   scriptTemplates: {
     penalty: string; // "{team} drar på sig en utvisning genom nummer {number}, {name}, {duration} för {reason}."
     penaltyTeam: string; // "Lagstraff för {team}, {duration} för {reason}."
@@ -103,6 +112,7 @@ export interface MatchProfile {
       | 'awayGoalSilence'
       | 'scriptTemplates'
       | 'keyBindings'
+      | 'soundboardGroups'
     >
   >;
   updatedAt: string;

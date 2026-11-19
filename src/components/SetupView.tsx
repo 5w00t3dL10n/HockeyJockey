@@ -3133,6 +3133,113 @@ export function SetupView({ onPreviewTrack, onStopAudio }: SetupViewProps) {
                   </button>
                 </div>
               </div>
+
+              {/* Track Transition Fade Out / Fade In Setting */}
+              <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3.5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <div className="text-sm font-bold text-white">
+                      Mjuk övergång (Fade Out / Fade In) vid låtbyte
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      {settings.crossfadeEnabled
+                        ? `Aktiv: när en låt redan spelas tonas den ut (${settings.crossfadeDurationMs} ms) innan nästa låt tonas in (${settings.crossfadeDurationMs} ms). Start från tystnad sker alltid omedelbart.`
+                        : 'Avstängd: byte mellan låtar sker direkt utan mjuk ut- och intoning.'}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.crossfadeEnabled}
+                    aria-label="Mjuk övergång (Fade Out / Fade In) vid låtbyte"
+                    onClick={() =>
+                      updateSettings({
+                        crossfadeEnabled: !settings.crossfadeEnabled,
+                      })
+                    }
+                    className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                      settings.crossfadeEnabled
+                        ? 'border-emerald-400/50 bg-emerald-600'
+                        : 'border-slate-600 bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                        settings.crossfadeEnabled
+                          ? 'translate-x-6'
+                          : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                <div
+                  className={`grid grid-cols-1 sm:grid-cols-[1fr_110px] gap-3 items-center pt-1 ${
+                    settings.crossfadeEnabled ? '' : 'opacity-50'
+                  }`}
+                >
+                  <div>
+                    <label
+                      htmlFor="crossfade-duration-range"
+                      className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1"
+                    >
+                      Tid per riktning ({settings.crossfadeDurationMs} ms)
+                    </label>
+                    <input
+                      id="crossfade-duration-range"
+                      type="range"
+                      min={0}
+                      max={2000}
+                      step={50}
+                      disabled={!settings.crossfadeEnabled}
+                      value={Math.min(2000, settings.crossfadeDurationMs)}
+                      onChange={(e) => {
+                        const parsed = Number(e.target.value);
+                        if (Number.isFinite(parsed)) {
+                          updateSettings({
+                            crossfadeDurationMs: Math.min(
+                              5000,
+                              Math.max(0, Math.round(parsed)),
+                            ),
+                          });
+                        }
+                      }}
+                      className="w-full accent-blue-500 cursor-pointer disabled:cursor-not-allowed"
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="crossfade-duration-input"
+                      className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1"
+                    >
+                      Millisekunder
+                    </label>
+                    <input
+                      id="crossfade-duration-input"
+                      type="number"
+                      min={0}
+                      max={5000}
+                      step={50}
+                      disabled={!settings.crossfadeEnabled}
+                      value={settings.crossfadeDurationMs}
+                      onChange={(e) => {
+                        const parsed = Number(e.target.value);
+                        if (Number.isFinite(parsed)) {
+                          updateSettings({
+                            crossfadeDurationMs: Math.min(
+                              5000,
+                              Math.max(0, Math.round(parsed)),
+                            ),
+                          });
+                        }
+                      }}
+                      className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-none disabled:cursor-not-allowed"
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Script Templates */}

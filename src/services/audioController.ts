@@ -429,6 +429,11 @@ export class AudioController {
     targetVolume = 1.0,
     previewMs?: number,
     trackMeta?: Partial<TrackCue>,
+    transitionOptions?: {
+      fadeWhenPlaying?: boolean;
+      fadeOutMs?: number;
+      fadeInMs?: number;
+    },
   ): Promise<void> {
     this.clearActiveRamp();
     this.clearPreviewTimer();
@@ -437,6 +442,45 @@ export class AudioController {
     const isLocal = isLocalAudioUri(trackUri);
     const safeVolume = Math.min(1, Math.max(0, targetVolume));
     const safePosition = Math.max(0, Math.round(positionMs));
+
+    const wasPlaying = this.state.isPlaying;
+    const shouldTransitionFade =
+      wasPlaying && (transitionOptions?.fadeWhenPlaying ?? true);
+    const rawFadeOut = transitionOptions?.fadeOutMs;
+    const rawFadeIn = transitionOptions?.fadeInMs;
+    const fadeOutMs =
+      shouldTransitionFade && this.state.volume > 0
+        ? Math.max(
+            0,
+            Math.round(
+              typeof rawFadeOut === 'number' && Number.isFinite(rawFadeOut)
+                ? rawFadeOut
+                : 350,
+            ),
+          )
+        : 0;
+    const fadeInMs = shouldTransitionFade
+      ? Math.max(
+          0,
+          Math.round(
+            typeof rawFadeIn === 'number' && Number.isFinite(rawFadeIn)
+              ? rawFadeIn
+              : 350,
+          ),
+        )
+      : 0;
+
+    // Fas A: Fade Out av pågående ljudkälla innan källbyte
+    if (shouldTransitionFade && fadeOutMs > 0) {
+      await this.runVolumeRamp(0.0, fadeOutMs);
+      if (requestSeq !== this.playRequestSeq) {
+        return;
+      }
+    }
+
+    const initialPlayVolume =
+      shouldTransitionFade && fadeInMs > 0 ? 0.0 : safeVolume;
+
     const track: TrackCue = {
       trackUri,
       title: trackMeta?.title?.trim() || 'Aktivt spår',
@@ -449,6 +493,7 @@ export class AudioController {
       ...(trackMeta?.mimeType ? { mimeType: trackMeta.mimeType } : {}),
     };
 
+    // Fas B: Källbyte och uppstart av nya låten
     if (isLocal) {
       this.stopSimulatedSynth();
       this.stopLocalAudioElement();
@@ -465,7 +510,7 @@ export class AudioController {
         }
       }
 
-      await this.applyTransportVolume(safeVolume);
+      await this.applyTransportVolume(initialPlayVolume);
 
       const playbackUrl = await getLocalAudioPlaybackUrl(trackUri);
       if (requestSeq !== this.playRequestSeq) {
@@ -474,7 +519,7 @@ export class AudioController {
 
       if (typeof Audio !== 'undefined' && playbackUrl) {
         const audio = new Audio(playbackUrl);
-        audio.volume = safeVolume;
+        audio.volume = initialPlayVolume;
         this.localAudioElement = audio;
 
         const targetSeconds = safePosition / 1000;
@@ -555,7 +600,7 @@ export class AudioController {
             err instanceof Error
               ? err.message
               : 'Kunde inte spela upp den lokala ljudfilen.';
-          this.startSimulatedSynth(safeVolume);
+          this.startSimulatedSynth(initialPlayVolume);
           this.updateState({
             isPlaying: true,
             isDucked: false,
@@ -566,7 +611,7 @@ export class AudioController {
           });
         }
       } else if (!playbackUrl) {
-        this.startSimulatedSynth(safeVolume);
+        this.startSimulatedSynth(initialPlayVolume);
         this.updateState({
           isPlaying: true,
           isDucked: false,
@@ -601,7 +646,7 @@ export class AudioController {
         }
       }
 
-      await this.applyTransportVolume(safeVolume);
+      await this.applyTransportVolume(initialPlayVolume);
       if (requestSeq !== this.playRequestSeq) {
         return;
       }
@@ -637,7 +682,7 @@ export class AudioController {
             err instanceof Error
               ? err.message
               : 'Kunde inte starta Spotify-uppspelning.';
-          this.startSimulatedSynth(safeVolume);
+          this.startSimulatedSynth(initialPlayVolume);
           this.updateState({
             mode: 'simulated',
             isPlaying: true,
@@ -649,7 +694,7 @@ export class AudioController {
           });
         }
       } else {
-        this.startSimulatedSynth(safeVolume);
+        this.startSimulatedSynth(initialPlayVolume);
         this.updateState({
           mode: 'simulated',
           isPlaying: true,
@@ -663,6 +708,18 @@ export class AudioController {
 
     this.startPositionTicker();
 
+    // Fas C: Fade In av nya låten
+    if (shouldTransitionFade && fadeInMs > 0 && safeVolume > 0) {
+      await this.runVolumeRamp(safeVolume, fadeInMs, {
+        isDuckedOnStart: false,
+        isDuckedOnFinish: false,
+      });
+      if (requestSeq !== this.playRequestSeq) {
+        return;
+      }
+    }
+
+    // Fas D: Schemalägg eventuell previewMs-timer
     if (
       typeof previewMs === 'number' &&
       Number.isFinite(previewMs) &&
@@ -698,6 +755,7 @@ export class AudioController {
   }
 
   public async fadeOutAndPause(durationMs = 600): Promise<void> {
+    this.playRequestSeq += 1;
     this.clearPreviewTimer();
     await this.runVolumeRamp(0.0, durationMs, {
       onCompleted: async () => {

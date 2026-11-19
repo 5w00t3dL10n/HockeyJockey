@@ -411,6 +411,8 @@ export const DEFAULT_SOUND_PADS: SoundPad[] = [
 export const DEFAULT_SETTINGS: AppSettings = {
   duckVolume: 0.2,
   fadeOutDurationMs: 600,
+  crossfadeEnabled: true,
+  crossfadeDurationMs: 350,
   awayGoalSilence: true,
   spotifyClientId: DEFAULT_SPOTIFY_CLIENT_ID,
   spotifyRedirectUri: 'http://127.0.0.1:5173/callback',
@@ -680,6 +682,8 @@ export const DEFAULT_MATCH_PROFILES: MatchProfile[] = [
     settings: {
       duckVolume: 0.2,
       fadeOutDurationMs: 600,
+      crossfadeEnabled: true,
+      crossfadeDurationMs: 350,
       awayGoalSilence: true,
       scriptTemplates: { ...DEFAULT_SETTINGS.scriptTemplates },
       keyBindings: {
@@ -700,6 +704,8 @@ export const DEFAULT_MATCH_PROFILES: MatchProfile[] = [
     settings: {
       duckVolume: 0.15,
       fadeOutDurationMs: 450,
+      crossfadeEnabled: true,
+      crossfadeDurationMs: 350,
       awayGoalSilence: true,
       scriptTemplates: { ...DEFAULT_SETTINGS.scriptTemplates },
       keyBindings: {

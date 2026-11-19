@@ -701,9 +701,28 @@ export const useAppStore = create<AppStoreState>()(
                   state.soundPads,
                 )
               : state.settings.soundboardGroups;
+          const nextCrossfadeEnabled =
+            typeof updates.crossfadeEnabled === 'boolean'
+              ? updates.crossfadeEnabled
+              : state.settings.crossfadeEnabled;
+          const nextCrossfadeDurationMs =
+            updates.crossfadeDurationMs !== undefined
+              ? typeof updates.crossfadeDurationMs === 'number' &&
+                !Number.isNaN(updates.crossfadeDurationMs)
+                ? Number.isFinite(updates.crossfadeDurationMs)
+                  ? Math.round(
+                      Math.min(5000, Math.max(0, updates.crossfadeDurationMs)),
+                    )
+                  : updates.crossfadeDurationMs > 0
+                    ? 5000
+                    : 0
+                : state.settings.crossfadeDurationMs
+              : state.settings.crossfadeDurationMs;
           const nextSettings: AppSettings = {
             ...state.settings,
             ...updates,
+            crossfadeEnabled: nextCrossfadeEnabled,
+            crossfadeDurationMs: nextCrossfadeDurationMs,
             keyBindings: nextKeyBindings,
             soundboardGroups: nextSoundboardGroups,
           };
@@ -960,6 +979,8 @@ export const useAppStore = create<AppStoreState>()(
           settings: {
             duckVolume: state.settings.duckVolume,
             fadeOutDurationMs: state.settings.fadeOutDurationMs,
+            crossfadeEnabled: state.settings.crossfadeEnabled,
+            crossfadeDurationMs: state.settings.crossfadeDurationMs,
             awayGoalSilence: state.settings.awayGoalSilence,
             scriptTemplates: { ...state.settings.scriptTemplates },
             keyBindings: clonedBindings,
@@ -1015,6 +1036,20 @@ export const useAppStore = create<AppStoreState>()(
           fadeOutDurationMs:
             profile.settings?.fadeOutDurationMs ??
             state.settings.fadeOutDurationMs,
+          crossfadeEnabled:
+            typeof profile.settings?.crossfadeEnabled === 'boolean'
+              ? profile.settings.crossfadeEnabled
+              : state.settings.crossfadeEnabled,
+          crossfadeDurationMs:
+            typeof profile.settings?.crossfadeDurationMs === 'number' &&
+            Number.isFinite(profile.settings.crossfadeDurationMs)
+              ? Math.round(
+                  Math.min(
+                    5000,
+                    Math.max(0, profile.settings.crossfadeDurationMs),
+                  ),
+                )
+              : state.settings.crossfadeDurationMs,
           awayGoalSilence:
             typeof profile.settings?.awayGoalSilence === 'boolean'
               ? profile.settings.awayGoalSilence

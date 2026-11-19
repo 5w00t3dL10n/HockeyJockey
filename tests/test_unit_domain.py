@@ -2262,6 +2262,278 @@ console.log(JSON.stringify({
             self.assertNotIn("{", text, f"Unreplaced placeholder in {key}: {text}")
             self.assertNotIn("}", text, f"Unreplaced placeholder in {key}: {text}")
 
+    def test_23_crossfade_settings_sanitize_match_config_and_profile(self) -> None:
+        """Verify crossfadeEnabled and crossfadeDurationMs defaults, [0, 5000] clamping, and explicit false/custom preservation in sanitizeMatchConfig & sanitizeMatchProfile."""
+        script = """
+import { DEFAULT_MATCH_PROFILES, DEFAULT_SETTINGS, DEFAULT_SOUND_PADS } from './src/data/defaults.ts';
+import { sanitizeMatchConfig, sanitizeMatchProfile } from './src/utils/domain.ts';
+
+// 1. Legacy configurations missing crossfadeEnabled / crossfadeDurationMs
+const missingSettingsCompletely = sanitizeMatchConfig({
+  version: 1,
+});
+
+const legacyWithoutCrossfade = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    duckVolume: 0.25,
+    fadeOutDurationMs: 500,
+  },
+});
+
+const invalidTypesConfig = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    crossfadeEnabled: 'false',
+    crossfadeDurationMs: 'not-a-number',
+  },
+});
+
+// 2. Clamping [0, 5000] and rounding in sanitizeMatchConfig
+const clampedBelowConfig = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    crossfadeEnabled: true,
+    crossfadeDurationMs: -50,
+  },
+});
+
+const clampedAboveConfig = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    crossfadeEnabled: true,
+    crossfadeDurationMs: 9999,
+  },
+});
+
+const explicitZeroConfig = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    crossfadeEnabled: true,
+    crossfadeDurationMs: 0,
+  },
+});
+
+const explicitMaxConfig = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    crossfadeEnabled: true,
+    crossfadeDurationMs: 5000,
+  },
+});
+
+// 3. Explicit false and custom duration (600ms) preserved across config + Zustand envelope
+const explicitFalseCustomRaw = {
+  version: 1,
+  settings: {
+    crossfadeEnabled: false,
+    crossfadeDurationMs: 600,
+  },
+  matchProfiles: [
+    {
+      id: 'prof-crossfade-false',
+      name: 'Crossfade AV 600ms',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        crossfadeEnabled: false,
+        crossfadeDurationMs: 600,
+      },
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    },
+    {
+      id: 'prof-crossfade-clamped-low',
+      name: 'Crossfade Klampad Låg',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        crossfadeEnabled: true,
+        crossfadeDurationMs: -50,
+      },
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    },
+    {
+      id: 'prof-crossfade-clamped-high',
+      name: 'Crossfade Klampad Hög',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        crossfadeEnabled: true,
+        crossfadeDurationMs: 9999,
+      },
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    },
+    {
+      id: 'prof-legacy-no-crossfade',
+      name: 'Äldre Profil',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        duckVolume: 0.3,
+      },
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    },
+  ],
+};
+
+const explicitFalseCustomConfig = sanitizeMatchConfig(explicitFalseCustomRaw);
+const explicitFalseCustomEnvelope = sanitizeMatchConfig({ state: explicitFalseCustomRaw, version: 1 });
+
+// 4. Direct sanitizeMatchProfile checks
+const directProfileFalseCustom = sanitizeMatchProfile({
+  id: 'direct-false',
+  name: 'Direkt Profil',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    crossfadeEnabled: false,
+    crossfadeDurationMs: 600,
+  },
+});
+
+const directProfileClampedLow = sanitizeMatchProfile({
+  id: 'direct-low',
+  name: 'Direkt Låg',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    crossfadeDurationMs: -50,
+  },
+});
+
+const directProfileClampedHigh = sanitizeMatchProfile({
+  id: 'direct-high',
+  name: 'Direkt Hög',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    crossfadeDurationMs: 9999,
+  },
+});
+
+const directProfileZero = sanitizeMatchProfile({
+  id: 'direct-zero',
+  name: 'Direkt Noll',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    crossfadeEnabled: true,
+    crossfadeDurationMs: 0,
+  },
+});
+
+const directProfileInvalidDuration = sanitizeMatchProfile({
+  id: 'direct-invalid-dur',
+  name: 'Direkt Ogiltig Tid',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    crossfadeEnabled: 'false',
+    crossfadeDurationMs: 'invalid',
+  },
+});
+
+const directProfileLegacyMissing = sanitizeMatchProfile({
+  id: 'direct-legacy-missing',
+  name: 'Direkt Äldre',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    duckVolume: 0.25,
+  },
+});
+
+console.log(JSON.stringify({
+  defaultCrossfadeEnabled: DEFAULT_SETTINGS.crossfadeEnabled,
+  defaultCrossfadeDurationMs: DEFAULT_SETTINGS.crossfadeDurationMs,
+  defaultProfilesCrossfade: DEFAULT_MATCH_PROFILES.map((p) => ({
+    id: p.id,
+    crossfadeEnabled: p.settings?.crossfadeEnabled,
+    crossfadeDurationMs: p.settings?.crossfadeDurationMs,
+  })),
+  missingSettingsCompletely: {
+    crossfadeEnabled: missingSettingsCompletely.settings.crossfadeEnabled,
+    crossfadeDurationMs: missingSettingsCompletely.settings.crossfadeDurationMs,
+    profileCount: missingSettingsCompletely.matchProfiles?.length ?? 0,
+    firstProfileCrossfadeEnabled: missingSettingsCompletely.matchProfiles?.[0]?.settings?.crossfadeEnabled,
+    firstProfileCrossfadeDurationMs: missingSettingsCompletely.matchProfiles?.[0]?.settings?.crossfadeDurationMs,
+  },
+  legacyWithoutCrossfade: {
+    crossfadeEnabled: legacyWithoutCrossfade.settings.crossfadeEnabled,
+    crossfadeDurationMs: legacyWithoutCrossfade.settings.crossfadeDurationMs,
+  },
+  invalidTypesConfig: {
+    crossfadeEnabled: invalidTypesConfig.settings.crossfadeEnabled,
+    crossfadeDurationMs: invalidTypesConfig.settings.crossfadeDurationMs,
+  },
+  clampedBelowConfig: clampedBelowConfig.settings.crossfadeDurationMs,
+  clampedAboveConfig: clampedAboveConfig.settings.crossfadeDurationMs,
+  explicitZeroConfig: explicitZeroConfig.settings.crossfadeDurationMs,
+  explicitMaxConfig: explicitMaxConfig.settings.crossfadeDurationMs,
+  explicitFalseCustomConfig: {
+    settingsEnabled: explicitFalseCustomConfig.settings.crossfadeEnabled,
+    settingsDuration: explicitFalseCustomConfig.settings.crossfadeDurationMs,
+    profiles: explicitFalseCustomConfig.matchProfiles?.map((p) => ({
+      id: p.id,
+      crossfadeEnabled: p.settings?.crossfadeEnabled ?? null,
+      crossfadeDurationMs: p.settings?.crossfadeDurationMs ?? null,
+    })),
+  },
+  envelopeMatchesConfig:
+    JSON.stringify(explicitFalseCustomEnvelope) === JSON.stringify(explicitFalseCustomConfig),
+  directProfileFalseCustom: directProfileFalseCustom?.settings ?? null,
+  directProfileClampedLow: directProfileClampedLow?.settings ?? null,
+  directProfileClampedHigh: directProfileClampedHigh?.settings ?? null,
+  directProfileZero: directProfileZero?.settings ?? null,
+  directProfileInvalidDuration: directProfileInvalidDuration?.settings ?? null,
+  directProfileLegacyMissing: directProfileLegacyMissing?.settings ?? null,
+}));
+"""
+        res = run_ts_script(script)
+
+        self.assertIs(res["defaultCrossfadeEnabled"], True)
+        self.assertEqual(res["defaultCrossfadeDurationMs"], 350)
+
+        self.assertGreaterEqual(len(res["defaultProfilesCrossfade"]), 2)
+        for prof in res["defaultProfilesCrossfade"]:
+            self.assertIs(prof["crossfadeEnabled"], True)
+            self.assertEqual(prof["crossfadeDurationMs"], 350)
+
+        self.assertIs(res["missingSettingsCompletely"]["crossfadeEnabled"], True)
+        self.assertEqual(res["missingSettingsCompletely"]["crossfadeDurationMs"], 350)
+        self.assertGreaterEqual(res["missingSettingsCompletely"]["profileCount"], 2)
+        self.assertIs(res["missingSettingsCompletely"]["firstProfileCrossfadeEnabled"], True)
+        self.assertEqual(res["missingSettingsCompletely"]["firstProfileCrossfadeDurationMs"], 350)
+
+        self.assertIs(res["legacyWithoutCrossfade"]["crossfadeEnabled"], True)
+        self.assertEqual(res["legacyWithoutCrossfade"]["crossfadeDurationMs"], 350)
+
+        self.assertIs(res["invalidTypesConfig"]["crossfadeEnabled"], True)
+        self.assertEqual(res["invalidTypesConfig"]["crossfadeDurationMs"], 350)
+
+        self.assertEqual(res["clampedBelowConfig"], 0)
+        self.assertEqual(res["clampedAboveConfig"], 5000)
+        self.assertEqual(res["explicitZeroConfig"], 0)
+        self.assertEqual(res["explicitMaxConfig"], 5000)
+
+        cfg_res = res["explicitFalseCustomConfig"]
+        self.assertIs(cfg_res["settingsEnabled"], False)
+        self.assertEqual(cfg_res["settingsDuration"], 600)
+        self.assertTrue(res["envelopeMatchesConfig"])
+
+        profiles_by_id = {p["id"]: p for p in cfg_res["profiles"]}
+        self.assertIs(profiles_by_id["prof-crossfade-false"]["crossfadeEnabled"], False)
+        self.assertEqual(profiles_by_id["prof-crossfade-false"]["crossfadeDurationMs"], 600)
+        self.assertIs(profiles_by_id["prof-crossfade-clamped-low"]["crossfadeEnabled"], True)
+        self.assertEqual(profiles_by_id["prof-crossfade-clamped-low"]["crossfadeDurationMs"], 0)
+        self.assertIs(profiles_by_id["prof-crossfade-clamped-high"]["crossfadeEnabled"], True)
+        self.assertEqual(profiles_by_id["prof-crossfade-clamped-high"]["crossfadeDurationMs"], 5000)
+        self.assertIsNone(profiles_by_id["prof-legacy-no-crossfade"]["crossfadeEnabled"])
+        self.assertIsNone(profiles_by_id["prof-legacy-no-crossfade"]["crossfadeDurationMs"])
+
+        self.assertEqual(
+            res["directProfileFalseCustom"],
+            {"crossfadeEnabled": False, "crossfadeDurationMs": 600},
+        )
+        self.assertEqual(res["directProfileClampedLow"], {"crossfadeDurationMs": 0})
+        self.assertEqual(res["directProfileClampedHigh"], {"crossfadeDurationMs": 5000})
+        self.assertEqual(
+            res["directProfileZero"],
+            {"crossfadeEnabled": True, "crossfadeDurationMs": 0},
+        )
+        self.assertEqual(res["directProfileInvalidDuration"], {"crossfadeDurationMs": 350})
+        self.assertEqual(res["directProfileLegacyMissing"], {"duckVolume": 0.25})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

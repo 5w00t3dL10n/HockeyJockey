@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, section 4.2 of 13_oracle_local_audio_files_init.md, section 4.2 of 15_oracle_embedded_media_archive_init.md, AND section 4.2 of 17_oracle_roster_lookup_and_teleprompter_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, section 4.2 of 13_oracle_local_audio_files_init.md, section 4.2 of 15_oracle_embedded_media_archive_init.md, section 4.2 of 17_oracle_roster_lookup_and_teleprompter_init.md, AND section 4.2 of 19_oracle_track_transition_fade_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
@@ -23,6 +23,7 @@ Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 
 19. Embedded media archive directory `src/media` existence, audio file filtering, `registerEmbeddedMediaItems`, `syncEmbeddedMediaArchive`, `getLocalAudioPlaybackUrl`, and `getLocalAudioRecord`.
 20. Zustand `useAppStore.importEmbeddedMediaArchive` auto-creation in `'media_archive'` group, idempotency on repeated loads, user-deletion respect, and `resetToDefaults()` isolation.
 21. `DEFAULT_TEAMS.home` (*Sundsvall Hockey*) default roster (`#12`, `#6`, `#22`, `#00`), `useAppStore.upsertPlayer` jersey normalization (`'#12'` -> `'12'`), and `generateGoalScript` / `generatePenaltyScript` teleprompter output with full player names.
+22. `AudioController.playAt()` track transition fades: immediate target volume from silence (`isPlaying === false`), two-phase Fade Out to `0.0` before starting Track 2 at `0.0` followed by Fade In (`fadeOutMs: 150, fadeInMs: 150`) across Spotify -> Spotify, Local -> Local, and Spotify -> Local, plus direct cuts (`fadeWhenPlaying: false` and `fadeOutMs: 0, fadeInMs: 0`).
 
 Deterministic exit codes:
 - 0: All oracle checks passed.
@@ -3453,6 +3454,617 @@ try {
         )
 
 
+def _assert_fade_out_to_zero(vols: list[float], max_start: float, label: str) -> None:
+    if len(vols) < 3:
+        raise AssertionError(f"{label}: expected >= 3 fade-out volume steps, got {vols!r}")
+    if abs(vols[-1] - 0.0) > 1e-6:
+        raise AssertionError(f"{label}: fade-out did not reach 0.0 before track switch: {vols!r}")
+
+    first_zero_idx = next((idx for idx, v in enumerate(vols) if abs(v - 0.0) <= 1e-6), -1)
+    if first_zero_idx < 2:
+        raise AssertionError(
+            f"{label}: expected >= 2 positive intermediate fade-out steps before 0.0, got {vols!r}"
+        )
+
+    ramp_prefix = vols[: first_zero_idx + 1]
+    for idx, val in enumerate(ramp_prefix):
+        if idx < first_zero_idx and not (0.0 < val < max_start):
+            raise AssertionError(
+                f"{label}: intermediate fade-out step {val!r} out of range (0, {max_start}): {vols!r}"
+            )
+        if idx > 0 and val >= ramp_prefix[idx - 1]:
+            raise AssertionError(
+                f"{label}: fade-out steps must be strictly decreasing: {vols!r}"
+            )
+
+    for trailing in vols[first_zero_idx + 1 :]:
+        if abs(trailing - 0.0) > 1e-6:
+            raise AssertionError(f"{label}: unexpected non-zero volume after reaching 0.0: {vols!r}")
+
+
+def _assert_fade_in_to_target(vols: list[float], target: float, label: str) -> None:
+    if len(vols) < 3:
+        raise AssertionError(f"{label}: expected >= 3 fade-in volume steps, got {vols!r}")
+    if abs(vols[-1] - target) > 1e-6:
+        raise AssertionError(
+            f"{label}: fade-in final volume mismatch (expected {target}, got {vols[-1]!r}): {vols!r}"
+        )
+
+    for idx, val in enumerate(vols):
+        if idx < len(vols) - 1 and not (0.0 < val < target):
+            raise AssertionError(
+                f"{label}: intermediate fade-in step {val!r} out of range (0, {target}): {vols!r}"
+            )
+        if idx > 0 and val <= vols[idx - 1]:
+            raise AssertionError(
+                f"{label}: fade-in steps must be strictly increasing: {vols!r}"
+            )
+
+
+def check_audio_controller_track_transition_fade() -> None:
+    """Oracle 22: Verify AudioController.playAt() transition fades across Spotify/Local and direct cuts."""
+    script = """
+import { AudioController } from './src/services/audioController.ts';
+import {
+  deleteLocalAudioFile,
+  saveLocalAudioFile,
+} from './src/services/localAudioStorage.ts';
+
+const hadOriginalAudio = 'Audio' in globalThis;
+const originalAudio = globalThis.Audio;
+
+let events = [];
+let nextAudioId = 1;
+let lastSpotifyVolume = null;
+
+class TimelineMockAudio {
+  constructor(src) {
+    this.instanceId = nextAudioId++;
+    this.src = src;
+    this._volume = 1.0;
+    this.currentTime = 0;
+    this.duration = 120;
+    this.readyState = 1;
+    this.paused = true;
+    this.listeners = new Map();
+    events.push({ kind: 'audio:create', instanceId: this.instanceId, src });
+  }
+  get volume() {
+    return this._volume;
+  }
+  set volume(v) {
+    this._volume = v;
+    events.push({ kind: 'audio:setVolume', instanceId: this.instanceId, volume: v });
+  }
+  addEventListener(event, handler) {
+    if (!this.listeners.has(event)) {
+      this.listeners.set(event, new Set());
+    }
+    this.listeners.get(event).add(handler);
+  }
+  removeEventListener(event, handler) {
+    this.listeners.get(event)?.delete(handler);
+  }
+  async play() {
+    this.paused = false;
+    events.push({
+      kind: 'audio:play',
+      instanceId: this.instanceId,
+      volumeAtPlay: this._volume,
+    });
+  }
+  pause() {
+    this.paused = true;
+    events.push({
+      kind: 'audio:pause',
+      instanceId: this.instanceId,
+      volumeAtPause: this._volume,
+    });
+  }
+  removeAttribute(name) {
+    if (name === 'src') {
+      this.src = '';
+    }
+  }
+  load() {}
+}
+
+globalThis.Audio = TimelineMockAudio;
+
+const local1 = await saveLocalAudioFile(
+  {
+    name: 'Local Fade One.mp3',
+    type: 'audio/mpeg',
+    size: 8,
+    arrayBuffer: async () => new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer,
+  },
+  'local:audio:oracle_fade_local_1',
+);
+const local2 = await saveLocalAudioFile(
+  {
+    name: 'Local Fade Two.wav',
+    type: 'audio/wav',
+    size: 8,
+    arrayBuffer: async () => new Uint8Array([8, 7, 6, 5, 4, 3, 2, 1]).buffer,
+  },
+  'local:audio:oracle_fade_local_2',
+);
+
+const mockSpotifyAdapter = {
+  isReady: () => true,
+  getDeviceId: () => 'oracle-fade-device',
+  getDeviceName: () => 'Oracle DJ Booth',
+  playTrack: async (trackUri, positionMs) => {
+    events.push({
+      kind: 'spotify:playTrack',
+      trackUri,
+      positionMs,
+      volumeAtCall: lastSpotifyVolume,
+    });
+  },
+  pause: async () => {
+    events.push({
+      kind: 'spotify:pause',
+      volumeAtPause: lastSpotifyVolume,
+    });
+  },
+  setVolume: async (volume) => {
+    lastSpotifyVolume = volume;
+    events.push({ kind: 'spotify:setVolume', volume });
+  },
+};
+
+function takeEvents() {
+  const copy = events.slice();
+  events = [];
+  return copy;
+}
+
+const controllers = [];
+function createController() {
+  const c = new AudioController(mockSpotifyAdapter);
+  controllers.push(c);
+  return c;
+}
+
+try {
+  // Scenario A: Spotify -> Spotify (start from silence, then transition with fadeOutMs: 150, fadeInMs: 150)
+  lastSpotifyVolume = null;
+  events = [];
+  const ctrlA = createController();
+  const initialSilenceStateA = ctrlA.getState();
+  await ctrlA.playAt(
+    'spotify:track:1111111111111111111111',
+    10000,
+    1.0,
+    undefined,
+    { title: 'Spotify Track 1', artist: 'Artist 1' },
+    { fadeWhenPlaying: true, fadeOutMs: 150, fadeInMs: 150 },
+  );
+  const eventsSpotifyFromSilence = takeEvents();
+  const stateAfterSpotify1 = ctrlA.getState();
+
+  await ctrlA.playAt(
+    'spotify:track:2222222222222222222222',
+    20000,
+    0.85,
+    undefined,
+    { title: 'Spotify Track 2', artist: 'Artist 2' },
+    { fadeWhenPlaying: true, fadeOutMs: 150, fadeInMs: 150 },
+  );
+  const eventsSpotifyToSpotifyFade = takeEvents();
+  const stateAfterSpotify2 = ctrlA.getState();
+  await ctrlA.hardStop();
+
+  // Scenario B: Local -> Local (start from silence, then transition with fadeOutMs: 150, fadeInMs: 150)
+  lastSpotifyVolume = null;
+  events = [];
+  nextAudioId = 1;
+  const ctrlB = createController();
+  const initialSilenceStateB = ctrlB.getState();
+  await ctrlB.playAt(
+    local1.trackUri,
+    0,
+    1.0,
+    undefined,
+    { title: 'Local Track 1', sourceType: 'local' },
+    { fadeWhenPlaying: true, fadeOutMs: 150, fadeInMs: 150 },
+  );
+  const eventsLocalFromSilence = takeEvents();
+  const stateAfterLocal1 = ctrlB.getState();
+
+  await ctrlB.playAt(
+    local2.trackUri,
+    5000,
+    0.8,
+    undefined,
+    { title: 'Local Track 2', sourceType: 'local' },
+    { fadeWhenPlaying: true, fadeOutMs: 150, fadeInMs: 150 },
+  );
+  const eventsLocalToLocalFade = takeEvents();
+  const stateAfterLocal2 = ctrlB.getState();
+  await ctrlB.hardStop();
+
+  // Scenario C: Spotify -> Local (fadeOutMs: 150, fadeInMs: 150)
+  lastSpotifyVolume = null;
+  events = [];
+  nextAudioId = 1;
+  const ctrlC = createController();
+  await ctrlC.playAt(
+    'spotify:track:3333333333333333333333',
+    0,
+    1.0,
+    undefined,
+    { title: 'Spotify Before Local' },
+    { fadeWhenPlaying: true, fadeOutMs: 150, fadeInMs: 150 },
+  );
+  takeEvents();
+
+  await ctrlC.playAt(
+    local1.trackUri,
+    2500,
+    0.9,
+    undefined,
+    { title: 'Local After Spotify', sourceType: 'local' },
+    { fadeWhenPlaying: true, fadeOutMs: 150, fadeInMs: 150 },
+  );
+  const eventsSpotifyToLocalFade = takeEvents();
+  const stateAfterSpotifyToLocal = ctrlC.getState();
+  await ctrlC.hardStop();
+
+  // Scenario D: Direct cut with fadeWhenPlaying: false (even with non-zero fadeOutMs/fadeInMs)
+  lastSpotifyVolume = null;
+  events = [];
+  const ctrlD1 = createController();
+  await ctrlD1.playAt(
+    'spotify:track:4444444444444444444444',
+    0,
+    1.0,
+    undefined,
+    { title: 'Spotify Direct 1' },
+  );
+  takeEvents();
+  await ctrlD1.playAt(
+    'spotify:track:5555555555555555555555',
+    15000,
+    0.75,
+    undefined,
+    { title: 'Spotify Direct 2' },
+    { fadeWhenPlaying: false, fadeOutMs: 150, fadeInMs: 150 },
+  );
+  const eventsSpotifyFadeDisabled = takeEvents();
+  const stateAfterSpotifyFadeDisabled = ctrlD1.getState();
+  await ctrlD1.hardStop();
+
+  lastSpotifyVolume = null;
+  events = [];
+  nextAudioId = 1;
+  const ctrlD2 = createController();
+  await ctrlD2.playAt(
+    local1.trackUri,
+    0,
+    1.0,
+    undefined,
+    { title: 'Local Direct 1', sourceType: 'local' },
+  );
+  takeEvents();
+  await ctrlD2.playAt(
+    local2.trackUri,
+    0,
+    0.75,
+    undefined,
+    { title: 'Local Direct 2', sourceType: 'local' },
+    { fadeWhenPlaying: false, fadeOutMs: 150, fadeInMs: 150 },
+  );
+  const eventsLocalFadeDisabled = takeEvents();
+  const stateAfterLocalFadeDisabled = ctrlD2.getState();
+  await ctrlD2.hardStop();
+
+  // Scenario E: Direct cut with fadeOutMs: 0, fadeInMs: 0 (with fadeWhenPlaying: true)
+  lastSpotifyVolume = null;
+  events = [];
+  const ctrlE1 = createController();
+  await ctrlE1.playAt(
+    'spotify:track:6666666666666666666666',
+    0,
+    1.0,
+    undefined,
+    { title: 'Spotify Zero 1' },
+  );
+  takeEvents();
+  await ctrlE1.playAt(
+    'spotify:track:7777777777777777777777',
+    30000,
+    0.65,
+    undefined,
+    { title: 'Spotify Zero 2' },
+    { fadeWhenPlaying: true, fadeOutMs: 0, fadeInMs: 0 },
+  );
+  const eventsSpotifyZeroFade = takeEvents();
+  const stateAfterSpotifyZeroFade = ctrlE1.getState();
+  await ctrlE1.hardStop();
+
+  lastSpotifyVolume = null;
+  events = [];
+  nextAudioId = 1;
+  const ctrlE2 = createController();
+  await ctrlE2.playAt(
+    local1.trackUri,
+    0,
+    1.0,
+    undefined,
+    { title: 'Local Zero 1', sourceType: 'local' },
+  );
+  takeEvents();
+  await ctrlE2.playAt(
+    local2.trackUri,
+    0,
+    0.65,
+    undefined,
+    { title: 'Local Zero 2', sourceType: 'local' },
+    { fadeWhenPlaying: true, fadeOutMs: 0, fadeInMs: 0 },
+  );
+  const eventsLocalZeroFade = takeEvents();
+  const stateAfterLocalZeroFade = ctrlE2.getState();
+  await ctrlE2.hardStop();
+
+  console.log(JSON.stringify({
+    local1Uri: local1.trackUri,
+    local2Uri: local2.trackUri,
+    initialSilenceStateA,
+    eventsSpotifyFromSilence,
+    stateAfterSpotify1,
+    eventsSpotifyToSpotifyFade,
+    stateAfterSpotify2,
+    initialSilenceStateB,
+    eventsLocalFromSilence,
+    stateAfterLocal1,
+    eventsLocalToLocalFade,
+    stateAfterLocal2,
+    eventsSpotifyToLocalFade,
+    stateAfterSpotifyToLocal,
+    eventsSpotifyFadeDisabled,
+    stateAfterSpotifyFadeDisabled,
+    eventsLocalFadeDisabled,
+    stateAfterLocalFadeDisabled,
+    eventsSpotifyZeroFade,
+    stateAfterSpotifyZeroFade,
+    eventsLocalZeroFade,
+    stateAfterLocalZeroFade,
+  }));
+} finally {
+  for (const c of controllers) {
+    c.dispose();
+  }
+  await deleteLocalAudioFile(local1.trackUri);
+  await deleteLocalAudioFile(local2.trackUri);
+  if (hadOriginalAudio) {
+    globalThis.Audio = originalAudio;
+  } else {
+    delete globalThis.Audio;
+  }
+}
+"""
+    res = run_ts_script(script, timeout=30)
+
+    # 1. Start from silence (Spotify & Local)
+    if res["initialSilenceStateA"]["isPlaying"] is not False or res["initialSilenceStateB"]["isPlaying"] is not False:
+        raise AssertionError("Initial AudioController state must have isPlaying === false")
+
+    ev_sp_silence = res["eventsSpotifyFromSilence"]
+    sp_silence_play_indices = [i for i, e in enumerate(ev_sp_silence) if e["kind"] == "spotify:playTrack"]
+    if len(sp_silence_play_indices) != 1:
+        raise AssertionError(f"Expected 1 spotify:playTrack from silence, got {ev_sp_silence!r}")
+    sp_play_idx = sp_silence_play_indices[0]
+    sp_vols_before = [e["volume"] for e in ev_sp_silence[:sp_play_idx] if e["kind"] == "spotify:setVolume"]
+    sp_vols_after = [e["volume"] for e in ev_sp_silence[sp_play_idx + 1 :] if e["kind"] == "spotify:setVolume"]
+    if sp_vols_before != [1.0] or sp_vols_after != [] or abs(ev_sp_silence[sp_play_idx]["volumeAtCall"] - 1.0) > 1e-6:
+        raise AssertionError(f"Spotify start from silence must apply 1.0 immediately without fade: {ev_sp_silence!r}")
+    if not res["stateAfterSpotify1"]["isPlaying"] or abs(res["stateAfterSpotify1"]["volume"] - 1.0) > 1e-6:
+        raise AssertionError(f"Unexpected state after Spotify start from silence: {res['stateAfterSpotify1']!r}")
+
+    ev_loc_silence = res["eventsLocalFromSilence"]
+    if any(e["kind"] in ("spotify:playTrack", "spotify:setVolume") for e in ev_loc_silence):
+        raise AssertionError(f"Local start from silence must not invoke Spotify playTrack/setVolume: {ev_loc_silence!r}")
+    loc_play_indices = [i for i, e in enumerate(ev_loc_silence) if e["kind"] == "audio:play" and e["instanceId"] == 1]
+    if len(loc_play_indices) != 1:
+        raise AssertionError(f"Expected 1 audio:play from silence, got {ev_loc_silence!r}")
+    loc_play_idx = loc_play_indices[0]
+    loc_vols_before = [
+        e["volume"]
+        for e in ev_loc_silence[:loc_play_idx]
+        if e["kind"] == "audio:setVolume" and e["instanceId"] == 1
+    ]
+    loc_vols_after = [
+        e["volume"]
+        for e in ev_loc_silence[loc_play_idx + 1 :]
+        if e["kind"] == "audio:setVolume" and e["instanceId"] == 1
+    ]
+    if loc_vols_before != [1.0] or loc_vols_after != [] or abs(ev_loc_silence[loc_play_idx]["volumeAtPlay"] - 1.0) > 1e-6:
+        raise AssertionError(f"Local start from silence must apply 1.0 immediately without fade: {ev_loc_silence!r}")
+    if not res["stateAfterLocal1"]["isPlaying"] or abs(res["stateAfterLocal1"]["volume"] - 1.0) > 1e-6:
+        raise AssertionError(f"Unexpected state after Local start from silence: {res['stateAfterLocal1']!r}")
+
+    # 2a. Transition Spotify -> Spotify (fadeOutMs: 150, fadeInMs: 150)
+    ev_sp_sp = res["eventsSpotifyToSpotifyFade"]
+    sp_sp_play_indices = [i for i, e in enumerate(ev_sp_sp) if e["kind"] == "spotify:playTrack"]
+    if len(sp_sp_play_indices) != 1:
+        raise AssertionError(f"Spotify->Spotify transition expected 1 playTrack, got {ev_sp_sp!r}")
+    sp_sp_play_idx = sp_sp_play_indices[0]
+    sp_sp_play_ev = ev_sp_sp[sp_sp_play_idx]
+    if sp_sp_play_ev["trackUri"] != "spotify:track:2222222222222222222222":
+        raise AssertionError(f"Unexpected trackUri in Spotify->Spotify transition: {sp_sp_play_ev!r}")
+    if abs(sp_sp_play_ev["volumeAtCall"] - 0.0) > 1e-6:
+        raise AssertionError(f"Spotify Track 2 must start at volume 0.0, got {sp_sp_play_ev!r}")
+    sp_sp_fade_out = [e["volume"] for e in ev_sp_sp[:sp_sp_play_idx] if e["kind"] == "spotify:setVolume"]
+    sp_sp_fade_in = [e["volume"] for e in ev_sp_sp[sp_sp_play_idx + 1 :] if e["kind"] == "spotify:setVolume"]
+    _assert_fade_out_to_zero(sp_sp_fade_out, 1.0, "Spotify->Spotify fade-out")
+    _assert_fade_in_to_target(sp_sp_fade_in, 0.85, "Spotify->Spotify fade-in")
+    st_sp2 = res["stateAfterSpotify2"]
+    if (
+        st_sp2["isPlaying"] is not True
+        or abs(st_sp2["volume"] - 0.85) > 1e-6
+        or (st_sp2["currentTrack"] or {}).get("trackUri") != "spotify:track:2222222222222222222222"
+    ):
+        raise AssertionError(f"Unexpected state after Spotify->Spotify fade: {st_sp2!r}")
+
+    # 2b. Transition Local -> Local (fadeOutMs: 150, fadeInMs: 150)
+    ev_loc_loc = res["eventsLocalToLocalFade"]
+    if any(e["kind"] in ("spotify:playTrack", "spotify:setVolume") for e in ev_loc_loc):
+        raise AssertionError(f"Local->Local transition must not invoke Spotify playTrack/setVolume: {ev_loc_loc!r}")
+    pause1_indices = [i for i, e in enumerate(ev_loc_loc) if e["kind"] == "audio:pause" and e["instanceId"] == 1]
+    create2_indices = [i for i, e in enumerate(ev_loc_loc) if e["kind"] == "audio:create" and e["instanceId"] == 2]
+    play2_indices = [i for i, e in enumerate(ev_loc_loc) if e["kind"] == "audio:play" and e["instanceId"] == 2]
+    if len(pause1_indices) != 1 or len(create2_indices) != 1 or len(play2_indices) != 1:
+        raise AssertionError(f"Unexpected Local->Local lifecycle events: {ev_loc_loc!r}")
+    pause1_idx, create2_idx, play2_idx = pause1_indices[0], create2_indices[0], play2_indices[0]
+    if not (pause1_idx < create2_idx < play2_idx):
+        raise AssertionError(
+            f"Local Track 1 must pause after fade-out before Local Track 2 starts: {ev_loc_loc!r}"
+        )
+    if abs(ev_loc_loc[pause1_idx]["volumeAtPause"] - 0.0) > 1e-6:
+        raise AssertionError(f"Local Track 1 must pause at 0.0 volume, got {ev_loc_loc[pause1_idx]!r}")
+    loc_fade_out = [
+        e["volume"]
+        for e in ev_loc_loc[:pause1_idx]
+        if e["kind"] == "audio:setVolume" and e["instanceId"] == 1
+    ]
+    _assert_fade_out_to_zero(loc_fade_out, 1.0, "Local->Local fade-out")
+    loc2_vols_before_play = [
+        e["volume"]
+        for e in ev_loc_loc[create2_idx:play2_idx]
+        if e["kind"] == "audio:setVolume" and e["instanceId"] == 2
+    ]
+    if loc2_vols_before_play != [0.0] or abs(ev_loc_loc[play2_idx]["volumeAtPlay"] - 0.0) > 1e-6:
+        raise AssertionError(f"Local Track 2 must start at volume 0.0: {ev_loc_loc!r}")
+    loc_fade_in = [
+        e["volume"]
+        for e in ev_loc_loc[play2_idx + 1 :]
+        if e["kind"] == "audio:setVolume" and e["instanceId"] == 2
+    ]
+    _assert_fade_in_to_target(loc_fade_in, 0.8, "Local->Local fade-in")
+    st_loc2 = res["stateAfterLocal2"]
+    if (
+        st_loc2["isPlaying"] is not True
+        or abs(st_loc2["volume"] - 0.8) > 1e-6
+        or (st_loc2["currentTrack"] or {}).get("trackUri") != res["local2Uri"]
+    ):
+        raise AssertionError(f"Unexpected state after Local->Local fade: {st_loc2!r}")
+
+    # 2c. Transition Spotify -> Local (fadeOutMs: 150, fadeInMs: 150)
+    ev_sp_loc = res["eventsSpotifyToLocalFade"]
+    sp_pause_indices = [i for i, e in enumerate(ev_sp_loc) if e["kind"] == "spotify:pause"]
+    loc_create_indices = [i for i, e in enumerate(ev_sp_loc) if e["kind"] == "audio:create"]
+    loc_play_indices = [i for i, e in enumerate(ev_sp_loc) if e["kind"] == "audio:play"]
+    if len(sp_pause_indices) != 1 or len(loc_create_indices) != 1 or len(loc_play_indices) != 1:
+        raise AssertionError(f"Unexpected Spotify->Local lifecycle events: {ev_sp_loc!r}")
+    sp_pause_idx, loc_create_idx, loc_play_idx = sp_pause_indices[0], loc_create_indices[0], loc_play_indices[0]
+    if not (sp_pause_idx < loc_create_idx < loc_play_idx):
+        raise AssertionError(
+            f"Spotify Track 1 must fade out & pause before Local Track 2 starts: {ev_sp_loc!r}"
+        )
+    if abs(ev_sp_loc[sp_pause_idx]["volumeAtPause"] - 0.0) > 1e-6:
+        raise AssertionError(f"Spotify must pause at 0.0 volume, got {ev_sp_loc[sp_pause_idx]!r}")
+    sp_loc_fade_out = [e["volume"] for e in ev_sp_loc[:sp_pause_idx] if e["kind"] == "spotify:setVolume"]
+    _assert_fade_out_to_zero(sp_loc_fade_out, 1.0, "Spotify->Local fade-out")
+    if any(e["kind"] == "spotify:setVolume" for e in ev_sp_loc[sp_pause_idx + 1 :]):
+        raise AssertionError(f"Spotify->Local fade-in must never call Spotify setVolume: {ev_sp_loc!r}")
+    loc_init_vols = [
+        e["volume"]
+        for e in ev_sp_loc[loc_create_idx:loc_play_idx]
+        if e["kind"] == "audio:setVolume"
+    ]
+    if loc_init_vols != [0.0] or abs(ev_sp_loc[loc_play_idx]["volumeAtPlay"] - 0.0) > 1e-6:
+        raise AssertionError(f"Local track in Spotify->Local transition must start at 0.0: {ev_sp_loc!r}")
+    sp_loc_fade_in = [e["volume"] for e in ev_sp_loc[loc_play_idx + 1 :] if e["kind"] == "audio:setVolume"]
+    _assert_fade_in_to_target(sp_loc_fade_in, 0.9, "Spotify->Local fade-in")
+    st_sp_loc = res["stateAfterSpotifyToLocal"]
+    if (
+        st_sp_loc["isPlaying"] is not True
+        or abs(st_sp_loc["volume"] - 0.9) > 1e-6
+        or (st_sp_loc["currentTrack"] or {}).get("trackUri") != res["local1Uri"]
+    ):
+        raise AssertionError(f"Unexpected state after Spotify->Local fade: {st_sp_loc!r}")
+
+    # 3. Direct cuts without fade ramp (fadeWhenPlaying: false AND fadeOutMs: 0, fadeInMs: 0)
+    def assert_spotify_direct_cut(ev_list: list[dict[str, Any]], target: float, state: dict[str, Any], label: str) -> None:
+        p_indices = [i for i, e in enumerate(ev_list) if e["kind"] == "spotify:playTrack"]
+        if len(p_indices) != 1:
+            raise AssertionError(f"{label}: expected 1 spotify:playTrack, got {ev_list!r}")
+        p_idx = p_indices[0]
+        vols_before = [e["volume"] for e in ev_list[:p_idx] if e["kind"] == "spotify:setVolume"]
+        vols_after = [e["volume"] for e in ev_list[p_idx + 1 :] if e["kind"] == "spotify:setVolume"]
+        if (
+            len(vols_before) != 1
+            or abs(vols_before[0] - target) > 1e-6
+            or vols_after != []
+            or abs(ev_list[p_idx]["volumeAtCall"] - target) > 1e-6
+        ):
+            raise AssertionError(f"{label}: expected direct volume {target} without ramp steps, got {ev_list!r}")
+        if state["isPlaying"] is not True or abs(state["volume"] - target) > 1e-6:
+            raise AssertionError(f"{label}: unexpected final state {state!r}")
+
+    def assert_local_direct_cut(ev_list: list[dict[str, Any]], target: float, state: dict[str, Any], label: str) -> None:
+        if any(e["kind"] in ("spotify:playTrack", "spotify:setVolume") for e in ev_list):
+            raise AssertionError(f"{label}: local direct cut touched Spotify adapter: {ev_list!r}")
+        p1_indices = [i for i, e in enumerate(ev_list) if e["kind"] == "audio:pause" and e["instanceId"] == 1]
+        c2_indices = [i for i, e in enumerate(ev_list) if e["kind"] == "audio:create" and e["instanceId"] == 2]
+        p2_indices = [i for i, e in enumerate(ev_list) if e["kind"] == "audio:play" and e["instanceId"] == 2]
+        if len(p1_indices) != 1 or len(c2_indices) != 1 or len(p2_indices) != 1:
+            raise AssertionError(f"{label}: unexpected lifecycle events: {ev_list!r}")
+        p1_idx, c2_idx, p2_idx = p1_indices[0], c2_indices[0], p2_indices[0]
+        audio1_vols = [
+            e["volume"]
+            for e in ev_list[:p1_idx]
+            if e["kind"] == "audio:setVolume" and e["instanceId"] == 1
+        ]
+        audio2_vols_before = [
+            e["volume"]
+            for e in ev_list[c2_idx:p2_idx]
+            if e["kind"] == "audio:setVolume" and e["instanceId"] == 2
+        ]
+        audio2_vols_after = [
+            e["volume"]
+            for e in ev_list[p2_idx + 1 :]
+            if e["kind"] == "audio:setVolume" and e["instanceId"] == 2
+        ]
+        if (
+            audio1_vols != []
+            or len(audio2_vols_before) != 1
+            or abs(audio2_vols_before[0] - target) > 1e-6
+            or audio2_vols_after != []
+            or abs(ev_list[p2_idx]["volumeAtPlay"] - target) > 1e-6
+        ):
+            raise AssertionError(f"{label}: expected direct local cut at {target} without ramp steps, got {ev_list!r}")
+        if state["isPlaying"] is not True or abs(state["volume"] - target) > 1e-6:
+            raise AssertionError(f"{label}: unexpected final state {state!r}")
+
+    assert_spotify_direct_cut(
+        res["eventsSpotifyFadeDisabled"],
+        0.75,
+        res["stateAfterSpotifyFadeDisabled"],
+        "Spotify->Spotify fadeWhenPlaying=false",
+    )
+    assert_local_direct_cut(
+        res["eventsLocalFadeDisabled"],
+        0.75,
+        res["stateAfterLocalFadeDisabled"],
+        "Local->Local fadeWhenPlaying=false",
+    )
+    assert_spotify_direct_cut(
+        res["eventsSpotifyZeroFade"],
+        0.65,
+        res["stateAfterSpotifyZeroFade"],
+        "Spotify->Spotify fadeOutMs=0,fadeInMs=0",
+    )
+    assert_local_direct_cut(
+        res["eventsLocalZeroFade"],
+        0.65,
+        res["stateAfterLocalZeroFade"],
+        "Local->Local fadeOutMs=0,fadeInMs=0",
+    )
+
+
 def main() -> int:
     checks = [
         ("1. Production build & dist/ artifacts", check_production_build),
@@ -3476,6 +4088,7 @@ def main() -> int:
         ("19. Embedded media archive dir src/media, filtering & localAudioStorage streamUrl resolution", check_embedded_media_archive_dir_and_storage),
         ("20. Store importEmbeddedMediaArchive auto-pads in 'media_archive', idempotency & deletion respect", check_store_embedded_media_archive_idempotency),
         ("21. DEFAULT_TEAMS.home roster (#12, #6, #22, #00), upsertPlayer normalization & teleprompter full-name output", check_roster_lookup_and_teleprompter),
+        ("22. AudioController.playAt() transition fade out/in & direct cut across Spotify/Local", check_audio_controller_track_transition_fade),
     ]
 
     for label, fn in checks:

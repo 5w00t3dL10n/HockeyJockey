@@ -190,9 +190,18 @@ export function App() {
         pad.volume ?? 1.0,
         undefined,
         track,
+        {
+          fadeWhenPlaying: settings.crossfadeEnabled,
+          fadeOutMs: settings.crossfadeDurationMs,
+          fadeInMs: settings.crossfadeDurationMs,
+        },
       );
     },
-    [advancePadRotation],
+    [
+      advancePadRotation,
+      settings.crossfadeEnabled,
+      settings.crossfadeDurationMs,
+    ],
   );
 
   const findPadForFlow = useCallback(
@@ -277,15 +286,23 @@ export function App() {
     audioController.setSimulatedMode('Utloggad från Spotify – Simulerat Läge');
   }, []);
 
-  const handlePreviewTrack = useCallback((track: TrackCue, volume: number) => {
-    void audioController.playAt(
-      track.trackUri,
-      track.startTimeMs,
-      volume,
-      5000,
-      track,
-    );
-  }, []);
+  const handlePreviewTrack = useCallback(
+    (track: TrackCue, volume: number) => {
+      void audioController.playAt(
+        track.trackUri,
+        track.startTimeMs,
+        volume,
+        5000,
+        track,
+        {
+          fadeWhenPlaying: settings.crossfadeEnabled,
+          fadeOutMs: settings.crossfadeDurationMs,
+          fadeInMs: settings.crossfadeDurationMs,
+        },
+      );
+    },
+    [settings.crossfadeEnabled, settings.crossfadeDurationMs],
+  );
 
   const handleTriggerPadById = useCallback(
     (padId: string) => {

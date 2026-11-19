@@ -77,6 +77,8 @@ export interface PenaltyDefinition {
 export interface AppSettings {
   duckVolume: number; // T.ex. 0.2
   fadeOutDurationMs: number; // T.ex. 600
+  crossfadeEnabled: boolean; // Mjuk Fade Out / Fade In vid byte från pågående låt
+  crossfadeDurationMs: number; // Tid per riktning i ms (default 350)
   awayGoalSilence: boolean;
   spotifyClientId: string;
   spotifyRedirectUri: string;
@@ -114,6 +116,8 @@ export interface MatchProfile {
       AppSettings,
       | 'duckVolume'
       | 'fadeOutDurationMs'
+      | 'crossfadeEnabled'
+      | 'crossfadeDurationMs'
       | 'awayGoalSilence'
       | 'scriptTemplates'
       | 'keyBindings'

@@ -1843,10 +1843,24 @@ function sanitizeSettings(
     typeof fallback.awayGoalSilence === 'boolean'
       ? fallback.awayGoalSilence
       : DEFAULT_SETTINGS.awayGoalSilence;
+  const fallbackCrossfadeEnabled =
+    typeof fallback.crossfadeEnabled === 'boolean'
+      ? fallback.crossfadeEnabled
+      : DEFAULT_SETTINGS.crossfadeEnabled;
+  const fallbackCrossfadeDurationMs = Math.round(
+    clampNumber(
+      Number(fallback.crossfadeDurationMs),
+      0,
+      5000,
+      DEFAULT_SETTINGS.crossfadeDurationMs,
+    ),
+  );
 
   if (!isPlainObject(rawSettings)) {
     return {
       ...fallback,
+      crossfadeEnabled: fallbackCrossfadeEnabled,
+      crossfadeDurationMs: fallbackCrossfadeDurationMs,
       awayGoalSilence: fallbackAwayGoalSilence,
       spotifyClientId: defaultClientId,
       keyBindings: sanitizeKeyBindings(
@@ -1872,6 +1886,14 @@ function sanitizeSettings(
       ? rawSettings.spotifyClientId.trim()
       : '';
 
+  const rawCrossfadeDuration =
+    typeof rawSettings.crossfadeDurationMs === 'number'
+      ? rawSettings.crossfadeDurationMs
+      : typeof rawSettings.crossfadeDurationMs === 'string' &&
+          rawSettings.crossfadeDurationMs.trim() !== ''
+        ? Number(rawSettings.crossfadeDurationMs)
+        : Number.NaN;
+
   return {
     duckVolume: clampNumber(
       Number(rawSettings.duckVolume),
@@ -1885,6 +1907,18 @@ function sanitizeSettings(
         0,
         10000,
         fallback.fadeOutDurationMs,
+      ),
+    ),
+    crossfadeEnabled:
+      typeof rawSettings.crossfadeEnabled === 'boolean'
+        ? rawSettings.crossfadeEnabled
+        : fallbackCrossfadeEnabled,
+    crossfadeDurationMs: Math.round(
+      clampNumber(
+        rawCrossfadeDuration,
+        0,
+        5000,
+        fallbackCrossfadeDurationMs,
       ),
     ),
     awayGoalSilence:
@@ -2035,6 +2069,25 @@ export function sanitizeMatchProfile(
           0,
           10000,
           DEFAULT_SETTINGS.fadeOutDurationMs,
+        ),
+      );
+    }
+
+    if (typeof rawSettings.crossfadeEnabled === 'boolean') {
+      sanitizedSettings.crossfadeEnabled = rawSettings.crossfadeEnabled;
+    }
+
+    if (
+      typeof rawSettings.crossfadeDurationMs === 'number' ||
+      (typeof rawSettings.crossfadeDurationMs === 'string' &&
+        rawSettings.crossfadeDurationMs.trim() !== '')
+    ) {
+      sanitizedSettings.crossfadeDurationMs = Math.round(
+        clampNumber(
+          Number(rawSettings.crossfadeDurationMs),
+          0,
+          5000,
+          DEFAULT_SETTINGS.crossfadeDurationMs,
         ),
       );
     }

@@ -1,0 +1,15 @@
+{
+  "project": "HockeyJockey",
+  "timestamp": "2026-11-19T09:53:03.589813+00:00",
+  "required_tools": "git,node,npm,python,gh",
+  "stages": {
+    "STAGE_1_STATIC": {
+      "status": "PASS",
+      "duration": 2.88,
+      "error": null
+    }
+  },
+  "overall_status": "VERIFIED",
+  "exit_code": 0,
+  "duration_seconds": 2.88
+}

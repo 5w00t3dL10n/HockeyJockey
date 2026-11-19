@@ -1857,6 +1857,411 @@ console.log(JSON.stringify({
             f"URI collision detected in buildEmbeddedMediaUri: {distinct_uris}",
         )
 
+    def test_20_normalize_jersey_and_lookup_player_name(self) -> None:
+        """Verify normalizeJerseyNumber and lookupPlayerName ('#12'<->'12', '06'<->'6', '00' vs '0', '12.', 'Nr 6')."""
+        script = """
+import { lookupPlayerName, normalizeJerseyNumber } from './src/utils/domain.ts';
+
+const normalized = {
+  hash12: normalizeJerseyNumber('#12'),
+  hashSpace12: normalizeJerseyNumber('# 12'),
+  plain12: normalizeJerseyNumber('12'),
+  dot12: normalizeJerseyNumber('12.'),
+  nr6: normalizeJerseyNumber('Nr 6'),
+  nrDot6: normalizeJerseyNumber('nr. 6'),
+  no6: normalizeJerseyNumber('No. 6'),
+  dash14: normalizeJerseyNumber('# 14 -'),
+  zeroZero: normalizeJerseyNumber('00'),
+  hashZeroZero: normalizeJerseyNumber('#00'),
+  singleZero: normalizeJerseyNumber('0'),
+  leadingZeroSix: normalizeJerseyNumber('06'),
+  empty: normalizeJerseyNumber(''),
+  whitespace: normalizeJerseyNumber('   '),
+};
+
+const rosterStandard = {
+  '00': 'Oscar Holm (MV)',
+  '6': 'Erik Lind',
+  '12': 'Kalle Svensson',
+  '22': 'Rasmus Karlsson',
+};
+
+const rosterZeroOnly = {
+  '0': 'Nollan Reserv',
+};
+
+const rosterBothZeros = {
+  '00': 'Oscar Holm (MV)',
+  '0': 'Nollan Reserv',
+};
+
+const rosterPrefixedAndPadded = {
+  '#12': 'Kalle Prefixed',
+  '06': 'Erik Padded',
+};
+
+const lookups = {
+  hash12OnStd: lookupPlayerName(rosterStandard, '#12'),
+  dot12OnStd: lookupPlayerName(rosterStandard, '12.'),
+  nr6OnStd: lookupPlayerName(rosterStandard, 'Nr 6'),
+  padded06OnStd: lookupPlayerName(rosterStandard, '06'),
+  hash06OnStd: lookupPlayerName(rosterStandard, '#06'),
+  nr06OnStd: lookupPlayerName(rosterStandard, 'Nr 06'),
+  plain12OnPrefixed: lookupPlayerName(rosterPrefixedAndPadded, '12'),
+  hash12OnPrefixed: lookupPlayerName(rosterPrefixedAndPadded, '#12'),
+  plain6OnPadded: lookupPlayerName(rosterPrefixedAndPadded, '6'),
+  hash6OnPadded: lookupPlayerName(rosterPrefixedAndPadded, '#6'),
+  nr6OnPadded: lookupPlayerName(rosterPrefixedAndPadded, 'Nr 6'),
+  padded06OnPadded: lookupPlayerName(rosterPrefixedAndPadded, '06'),
+  zeroZeroOnStd: lookupPlayerName(rosterStandard, '00'),
+  hashZeroZeroOnStd: lookupPlayerName(rosterStandard, '#00'),
+  singleZeroOnStd: lookupPlayerName(rosterStandard, '0') ?? null,
+  hashSingleZeroOnStd: lookupPlayerName(rosterStandard, '#0') ?? null,
+  zeroZeroOnZeroOnly: lookupPlayerName(rosterZeroOnly, '00') ?? null,
+  singleZeroOnZeroOnly: lookupPlayerName(rosterZeroOnly, '0'),
+  zeroZeroOnBoth: lookupPlayerName(rosterBothZeros, '00'),
+  singleZeroOnBoth: lookupPlayerName(rosterBothZeros, '0'),
+  missingOnStd: lookupPlayerName(rosterStandard, '99') ?? null,
+  emptyOnStd: lookupPlayerName(rosterStandard, '   ') ?? null,
+  undefinedRoster: lookupPlayerName(undefined, '12') ?? null,
+};
+
+console.log(JSON.stringify({ normalized, lookups }));
+"""
+        res = run_ts_script(script)
+        n = res["normalized"]
+        self.assertEqual(n["hash12"], "12")
+        self.assertEqual(n["hashSpace12"], "12")
+        self.assertEqual(n["plain12"], "12")
+        self.assertEqual(n["dot12"], "12")
+        self.assertEqual(n["nr6"], "6")
+        self.assertEqual(n["nrDot6"], "6")
+        self.assertEqual(n["no6"], "6")
+        self.assertEqual(n["dash14"], "14")
+        self.assertEqual(n["zeroZero"], "00")
+        self.assertEqual(n["hashZeroZero"], "00")
+        self.assertEqual(n["singleZero"], "0")
+        self.assertEqual(n["leadingZeroSix"], "06")
+        self.assertEqual(n["empty"], "")
+        self.assertEqual(n["whitespace"], "")
+
+        lkp = res["lookups"]
+        self.assertEqual(lkp["hash12OnStd"], "Kalle Svensson")
+        self.assertEqual(lkp["dot12OnStd"], "Kalle Svensson")
+        self.assertEqual(lkp["nr6OnStd"], "Erik Lind")
+        self.assertEqual(lkp["padded06OnStd"], "Erik Lind")
+        self.assertEqual(lkp["hash06OnStd"], "Erik Lind")
+        self.assertEqual(lkp["nr06OnStd"], "Erik Lind")
+        self.assertEqual(lkp["plain12OnPrefixed"], "Kalle Prefixed")
+        self.assertEqual(lkp["hash12OnPrefixed"], "Kalle Prefixed")
+        self.assertEqual(lkp["plain6OnPadded"], "Erik Padded")
+        self.assertEqual(lkp["hash6OnPadded"], "Erik Padded")
+        self.assertEqual(lkp["nr6OnPadded"], "Erik Padded")
+        self.assertEqual(lkp["padded06OnPadded"], "Erik Padded")
+        self.assertEqual(lkp["zeroZeroOnStd"], "Oscar Holm (MV)")
+        self.assertEqual(lkp["hashZeroZeroOnStd"], "Oscar Holm (MV)")
+        self.assertIsNone(lkp["singleZeroOnStd"])
+        self.assertIsNone(lkp["hashSingleZeroOnStd"])
+        self.assertIsNone(lkp["zeroZeroOnZeroOnly"])
+        self.assertEqual(lkp["singleZeroOnZeroOnly"], "Nollan Reserv")
+        self.assertEqual(lkp["zeroZeroOnBoth"], "Oscar Holm (MV)")
+        self.assertEqual(lkp["singleZeroOnBoth"], "Nollan Reserv")
+        self.assertIsNone(lkp["missingOnStd"])
+        self.assertIsNone(lkp["emptyOnStd"])
+        self.assertIsNone(lkp["undefinedRoster"])
+
+    def test_21_parse_roster_text_extended_formats(self) -> None:
+        """Verify parseRosterText handles dots, Nr prefix, spaced hashes, suffix #number, and (MV) goalie suffix."""
+        script = """
+import { parseRosterText } from './src/utils/domain.ts';
+
+const multiLineRoster = parseRosterText([
+  '12. Kalle Svensson',
+  'Nr 6 Erik Lind',
+  '# 14 - Erik Svensson',
+  '22 Rasmus Karlsson',
+  '00 Oscar Holm (MV)',
+].join('\\n'));
+
+const suffixAndZeroRoster = parseRosterText([
+  'Kalle Svensson #12',
+  '0 Nollan Reserv',
+  '00 Oscar Holm (MV)',
+].join('\\n'));
+
+console.log(JSON.stringify({
+  multiLineRoster,
+  suffixAndZeroRoster,
+}));
+"""
+        res = run_ts_script(script)
+        self.assertEqual(
+            res["multiLineRoster"],
+            {
+                "12": "Kalle Svensson",
+                "6": "Erik Lind",
+                "14": "Erik Svensson",
+                "22": "Rasmus Karlsson",
+                "00": "Oscar Holm (MV)",
+            },
+        )
+        self.assertEqual(
+            res["suffixAndZeroRoster"],
+            {
+                "12": "Kalle Svensson",
+                "0": "Nollan Reserv",
+                "00": "Oscar Holm (MV)",
+            },
+        )
+
+    def test_22_generate_scripts_roster_fallback_aliases_and_guaranteed_names(self) -> None:
+        """Verify generateGoalScript and generatePenaltyScript roster fallback, alias placeholders, and guaranteed scorer name insertion."""
+        script = """
+import { DEFAULT_SETTINGS } from './src/data/defaults.ts';
+import { generateGoalScript, generatePenaltyScript } from './src/utils/domain.ts';
+
+const roster = {
+  '00': 'Oscar Holm (MV)',
+  '6': 'Erik Lind',
+  '12': 'Kalle Svensson',
+  '22': 'Rasmus Karlsson',
+};
+
+// 1. Roster fallback with normalized jersey numbers & '00' vs '0' distinction
+const goalRosterFallback = generateGoalScript(DEFAULT_SETTINGS, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '#12',
+  assists: [{ number: '06' }, { number: 'Nr 22' }],
+  roster,
+});
+
+const goalZeroZeroRoster = generateGoalScript(DEFAULT_SETTINGS, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '#00',
+  roster,
+});
+
+const goalSingleZeroDoesNotMatchDoubleZero = generateGoalScript(DEFAULT_SETTINGS, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '0',
+  roster,
+});
+
+const penaltyRosterFallback = generatePenaltyScript(DEFAULT_SETTINGS, {
+  teamName: 'Sundsvall Hockey',
+  penaltyLabel: 'Tripping',
+  duration: '2 minuter',
+  playerNumber: 'Nr 6',
+  roster,
+});
+
+const penaltyExplicitNameOverridesRoster = generatePenaltyScript(DEFAULT_SETTINGS, {
+  teamName: 'Sundsvall Hockey',
+  penaltyLabel: 'Tripping',
+  duration: '2 minuter',
+  playerNumber: '12',
+  playerName: 'Annan Spelare',
+  roster,
+});
+
+// 2. Alias placeholders ({name}, {playerName}, {number}, {playerNumber}, {scorerNumber}, {scorerName})
+const aliasGoalSettings = {
+  ...DEFAULT_SETTINGS,
+  scriptTemplates: {
+    ...DEFAULT_SETTINGS.scriptTemplates,
+    goal: 'MÅL! {team} nr {number} {name}!',
+    goalWithAssist: 'MÅL! {team} #{playerNumber} ({playerName}) - pass: {assists}.',
+  },
+};
+
+const goalAliasNoAssist = generateGoalScript(aliasGoalSettings, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '12.',
+  roster,
+});
+
+const goalAliasWithAssist = generateGoalScript(aliasGoalSettings, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '#12',
+  assists: [{ number: '#6' }],
+  roster,
+});
+
+const goalAliasUnknownSettings = {
+  ...DEFAULT_SETTINGS,
+  scriptTemplates: {
+    ...DEFAULT_SETTINGS.scriptTemplates,
+    goal: 'MÅL {team} #{number}, {playerName}!',
+  },
+};
+
+const goalAliasUnknown = generateGoalScript(goalAliasUnknownSettings, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '99',
+  roster,
+});
+
+const penaltyAliasSettingsA = {
+  ...DEFAULT_SETTINGS,
+  scriptTemplates: {
+    ...DEFAULT_SETTINGS.scriptTemplates,
+    penalty: 'Utvisning {team}: #{playerNumber}, {playerName}, {duration} ({reason}).',
+  },
+};
+
+const penaltyAliasSettingsB = {
+  ...DEFAULT_SETTINGS,
+  scriptTemplates: {
+    ...DEFAULT_SETTINGS.scriptTemplates,
+    penalty: 'Utvisning {team}: #{scorerNumber}, {scorerName}, {duration} ({reason}).',
+  },
+};
+
+const penaltyAliasPlayer = generatePenaltyScript(penaltyAliasSettingsA, {
+  teamName: 'Sundsvall Hockey',
+  penaltyLabel: 'Tripping',
+  duration: '2 minuter',
+  playerNumber: '#12',
+  roster,
+});
+
+const penaltyAliasScorer = generatePenaltyScript(penaltyAliasSettingsB, {
+  teamName: 'Sundsvall Hockey',
+  penaltyLabel: 'Hooking',
+  duration: '2 minuter',
+  playerNumber: '22.',
+  roster,
+});
+
+const penaltyAliasUnknown = generatePenaltyScript(penaltyAliasSettingsA, {
+  teamName: 'Sundsvall Hockey',
+  penaltyLabel: 'Slashing',
+  duration: '2 minuter',
+  playerNumber: '99',
+  roster,
+});
+
+// 3. Guaranteed scorer name insertion even when goal templates omit {scorerName}/{name}/{playerName}
+const missingScorerNameSettings = {
+  ...DEFAULT_SETTINGS,
+  scriptTemplates: {
+    ...DEFAULT_SETTINGS.scriptTemplates,
+    goal: 'Mål för {team}! Målskytt nummer {scorerNumber}.',
+    goalWithAssist: 'Mål för {team}! Målskytt nummer {scorerNumber}. Framspelad av {assists}.',
+  },
+};
+
+const goalMissingPlaceholderRosterNoAssist = generateGoalScript(missingScorerNameSettings, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '#12',
+  assists: [],
+  roster,
+});
+
+const goalMissingPlaceholderRosterWithAssist = generateGoalScript(missingScorerNameSettings, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '#12',
+  assists: [{ number: '06' }],
+  roster,
+});
+
+const goalMissingPlaceholderExplicitName = generateGoalScript(missingScorerNameSettings, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '22',
+  scorerName: 'Rasmus Karlsson',
+});
+
+const goalMissingPlaceholderUnknownName = generateGoalScript(missingScorerNameSettings, {
+  teamName: 'Sundsvall Hockey',
+  scorerNumber: '99',
+  roster,
+});
+
+console.log(JSON.stringify({
+  goalRosterFallback,
+  goalZeroZeroRoster,
+  goalSingleZeroDoesNotMatchDoubleZero,
+  penaltyRosterFallback,
+  penaltyExplicitNameOverridesRoster,
+  goalAliasNoAssist,
+  goalAliasWithAssist,
+  goalAliasUnknown,
+  penaltyAliasPlayer,
+  penaltyAliasScorer,
+  penaltyAliasUnknown,
+  goalMissingPlaceholderRosterNoAssist,
+  goalMissingPlaceholderRosterWithAssist,
+  goalMissingPlaceholderExplicitName,
+  goalMissingPlaceholderUnknownName,
+}));
+"""
+        res = run_ts_script(script)
+
+        self.assertEqual(
+            res["goalRosterFallback"],
+            "Mål för Sundsvall Hockey! Målskytt nummer 12, Kalle Svensson. Framspelad av nummer 06 Erik Lind och nummer 22 Rasmus Karlsson.",
+        )
+        self.assertEqual(
+            res["goalZeroZeroRoster"],
+            "Mål för Sundsvall Hockey! Målskytt nummer 00, Oscar Holm (MV).",
+        )
+        self.assertEqual(
+            res["goalSingleZeroDoesNotMatchDoubleZero"],
+            "Mål för Sundsvall Hockey! Målskytt nummer 0.",
+        )
+        self.assertEqual(
+            res["penaltyRosterFallback"],
+            "Sundsvall Hockey drar på sig en utvisning genom nummer 6, Erik Lind, 2 minuter för Tripping.",
+        )
+        self.assertEqual(
+            res["penaltyExplicitNameOverridesRoster"],
+            "Sundsvall Hockey drar på sig en utvisning genom nummer 12, Annan Spelare, 2 minuter för Tripping.",
+        )
+        self.assertEqual(
+            res["goalAliasNoAssist"],
+            "MÅL! Sundsvall Hockey nr 12 Kalle Svensson!",
+        )
+        self.assertEqual(
+            res["goalAliasWithAssist"],
+            "MÅL! Sundsvall Hockey #12 (Kalle Svensson) - pass: nummer 6 Erik Lind.",
+        )
+        self.assertEqual(
+            res["goalAliasUnknown"],
+            "MÅL Sundsvall Hockey #99!",
+        )
+        self.assertEqual(
+            res["penaltyAliasPlayer"],
+            "Utvisning Sundsvall Hockey: #12, Kalle Svensson, 2 minuter (Tripping).",
+        )
+        self.assertEqual(
+            res["penaltyAliasScorer"],
+            "Utvisning Sundsvall Hockey: #22, Rasmus Karlsson, 2 minuter (Hooking).",
+        )
+        self.assertEqual(
+            res["penaltyAliasUnknown"],
+            "Utvisning Sundsvall Hockey: #99, 2 minuter (Slashing).",
+        )
+        self.assertEqual(
+            res["goalMissingPlaceholderRosterNoAssist"],
+            "Mål för Sundsvall Hockey! Målskytt nummer 12, Kalle Svensson.",
+        )
+        self.assertEqual(
+            res["goalMissingPlaceholderRosterWithAssist"],
+            "Mål för Sundsvall Hockey! Målskytt nummer 12, Kalle Svensson. Framspelad av nummer 06 Erik Lind.",
+        )
+        self.assertEqual(
+            res["goalMissingPlaceholderExplicitName"],
+            "Mål för Sundsvall Hockey! Målskytt nummer 22, Rasmus Karlsson.",
+        )
+        self.assertEqual(
+            res["goalMissingPlaceholderUnknownName"],
+            "Mål för Sundsvall Hockey! Målskytt nummer 99.",
+        )
+
+        for key, text in res.items():
+            self.assertNotIn("{", text, f"Unreplaced placeholder in {key}: {text}")
+            self.assertNotIn("}", text, f"Unreplaced placeholder in {key}: {text}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

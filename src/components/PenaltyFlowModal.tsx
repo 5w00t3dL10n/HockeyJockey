@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -22,8 +23,17 @@ import type {
   PenaltyDefinition,
   Team,
 } from '../types/models.ts';
-import { generatePenaltyScript } from '../utils/domain.ts';
+import {
+  generatePenaltyScript,
+  lookupPlayerName,
+  normalizeJerseyNumber,
+} from '../utils/domain.ts';
 import { RefereeIcon } from './RefereeIcons.tsx';
+import {
+  InlinePlayerNameEditor,
+  MissingPlayersScriptPanel,
+  RosterQuickSelect,
+} from './RosterQuickSelect.tsx';
 
 export interface ModalKeyboardHandle {
   onDigit: (digit: string) => void;
@@ -35,6 +45,7 @@ export interface ModalKeyboardHandle {
 interface PenaltyFlowModalProps {
   team: Team;
   settings: AppSettings;
+  onUpsertPlayer?: (playerNumber: string, playerName: string) => void;
   onStartPenaltyMusic: (teamId: 'home' | 'away') => void;
   onDuckAudio: () => void;
   onRestoreAudio: () => void;
@@ -52,6 +63,7 @@ export const PenaltyFlowModal = forwardRef<
   {
     team,
     settings,
+    onUpsertPlayer,
     onStartPenaltyMusic,
     onDuckAudio,
     onRestoreAudio,
@@ -63,10 +75,19 @@ export const PenaltyFlowModal = forwardRef<
 ) {
   const [step, setStep] = useState<PenaltyStep>('player');
   const [playerNumber, setPlayerNumber] = useState('');
+  const [inlinePlayerName, setInlinePlayerName] = useState('');
+  const [localRosterOverrides, setLocalRosterOverrides] = useState<
+    Record<string, string>
+  >({});
   const [isTeamPenalty, setIsTeamPenalty] = useState(false);
   const [duration, setDuration] = useState<string>(DEFAULT_PENALTY_DURATION);
   const [selectedPenalty, setSelectedPenalty] =
     useState<PenaltyDefinition | null>(null);
+
+  const effectiveRoster = useMemo(
+    () => ({ ...team.roster, ...localRosterOverrides }),
+    [team.roster, localRosterOverrides],
+  );
 
   const startedMusicRef = useRef(false);
   useEffect(() => {
@@ -77,13 +98,31 @@ export const PenaltyFlowModal = forwardRef<
   }, [onStartPenaltyMusic, team.id]);
 
   const matchedPlayerName =
-    playerNumber.length > 0 ? team.roster[playerNumber] : undefined;
+    playerNumber.length > 0
+      ? lookupPlayerName(effectiveRoster, playerNumber)
+      : undefined;
+
+  const handleSavePlayerName = (rawNumber: string, rawName: string) => {
+    const normalizedNum =
+      normalizeJerseyNumber(rawNumber) || rawNumber.trim();
+    const trimmedName = rawName.trim();
+    if (!normalizedNum || !trimmedName) {
+      return;
+    }
+    setLocalRosterOverrides((prev) => ({
+      ...prev,
+      [normalizedNum]: trimmedName,
+    }));
+    onUpsertPlayer?.(normalizedNum, trimmedName);
+    setInlinePlayerName('');
+  };
 
   const handleDigit = (digit: string) => {
     if (step !== 'player') {
       return;
     }
     setIsTeamPenalty(false);
+    setInlinePlayerName('');
     setPlayerNumber((prev) => (prev.length < 3 ? `${prev}${digit}` : prev));
   };
 
@@ -91,7 +130,15 @@ export const PenaltyFlowModal = forwardRef<
     if (step !== 'player') {
       return;
     }
+    setInlinePlayerName('');
     setPlayerNumber((prev) => prev.slice(0, -1));
+  };
+
+  const handleSelectPlayerChip = (jerseyNumber: string) => {
+    setInlinePlayerName('');
+    setPlayerNumber(jerseyNumber);
+    setIsTeamPenalty(false);
+    setStep('penalty');
   };
 
   const handleNextFromPlayer = () => {
@@ -101,6 +148,9 @@ export const PenaltyFlowModal = forwardRef<
     if (playerNumber.length === 0) {
       return;
     }
+    if (inlinePlayerName.trim()) {
+      handleSavePlayerName(playerNumber, inlinePlayerName);
+    }
     setIsTeamPenalty(false);
     setStep('penalty');
   };
@@ -108,6 +158,7 @@ export const PenaltyFlowModal = forwardRef<
   const handleSelectTeamPenalty = () => {
     setIsTeamPenalty(true);
     setPlayerNumber('');
+    setInlinePlayerName('');
     setStep('penalty');
   };
 
@@ -117,15 +168,28 @@ export const PenaltyFlowModal = forwardRef<
     onDuckAudio();
   };
 
+  const keyboardHandlersRef = useRef({
+    onDigit: handleDigit,
+    onBackspace: handleBackspace,
+    onEnter: handleNextFromPlayer,
+    onEscape: onCancelClose,
+  });
+  keyboardHandlersRef.current = {
+    onDigit: handleDigit,
+    onBackspace: handleBackspace,
+    onEnter: handleNextFromPlayer,
+    onEscape: onCancelClose,
+  };
+
   useImperativeHandle(
     ref,
     () => ({
-      onDigit: handleDigit,
-      onBackspace: handleBackspace,
-      onEnter: handleNextFromPlayer,
-      onEscape: onCancelClose,
+      onDigit: (digit: string) => keyboardHandlersRef.current.onDigit(digit),
+      onBackspace: () => keyboardHandlersRef.current.onBackspace(),
+      onEnter: () => keyboardHandlersRef.current.onEnter(),
+      onEscape: () => keyboardHandlersRef.current.onEscape(),
     }),
-    [step, playerNumber, onCancelClose],
+    [],
   );
 
   const scriptText = selectedPenalty
@@ -136,6 +200,7 @@ export const PenaltyFlowModal = forwardRef<
         playerNumber,
         playerName: matchedPlayerName,
         isTeamPenalty,
+        roster: effectiveRoster,
       })
     : '';
 
@@ -205,8 +270,8 @@ export const PenaltyFlowModal = forwardRef<
         <div className="p-6">
           {/* STEP 1: PLAYER NUMPAD */}
           {step === 'player' && (
-            <div className="space-y-6">
-              {/* Live Roster Display */}
+            <div className="space-y-5">
+              {/* Live Roster Display + Inline Name Entry */}
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-5 text-center">
                 <div className="text-xs font-bold uppercase tracking-wider text-slate-400">
                   Ange utvisad spelares tröjnummer
@@ -217,7 +282,7 @@ export const PenaltyFlowModal = forwardRef<
                 <div className="mt-2 min-h-[28px] text-lg font-bold">
                   {playerNumber.length === 0 ? (
                     <span className="text-slate-500">
-                      Tryck på siffrorna nedan eller använd tangentbordet (0–9)
+                      Slå siffror på numpad/tangentbord eller välj spelare ur truppen nedan
                     </span>
                   ) : matchedPlayerName ? (
                     <span className="text-emerald-400">
@@ -225,51 +290,71 @@ export const PenaltyFlowModal = forwardRef<
                     </span>
                   ) : (
                     <span className="text-amber-300">
-                      Nummer ej i trupp – fortsätt ändå
+                      Nummer ej i trupp – ange namn nedan eller fortsätt ändå
                     </span>
                   )}
                 </div>
+
+                {playerNumber.length > 0 && (
+                  <InlinePlayerNameEditor
+                    key={normalizeJerseyNumber(playerNumber) || playerNumber}
+                    jerseyNumber={playerNumber}
+                    existingName={matchedPlayerName}
+                    draftName={inlinePlayerName}
+                    onDraftNameChange={setInlinePlayerName}
+                    onSaveName={handleSavePlayerName}
+                  />
+                )}
               </div>
 
-              {/* Touch Numpad */}
-              <div className="grid grid-cols-3 gap-3 max-w-md mx-auto">
-                {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => (
+              {/* Touch Numpad + Quick Roster Chips */}
+              <div className="grid grid-cols-1 md:grid-cols-[auto_1fr] gap-5 items-start">
+                <div className="grid grid-cols-3 gap-3 max-w-md mx-auto w-full md:w-[276px]">
+                  {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => (
+                    <button
+                      key={digit}
+                      type="button"
+                      onClick={() => handleDigit(digit)}
+                      className="min-w-[80px] min-h-[76px] rounded-2xl border border-slate-700 bg-slate-800 text-3xl font-black text-white hover:bg-slate-700 active:scale-95 transition-all cursor-pointer"
+                    >
+                      {digit}
+                    </button>
+                  ))}
                   <button
-                    key={digit}
                     type="button"
-                    onClick={() => handleDigit(digit)}
-                    className="min-w-[80px] min-h-[80px] rounded-2xl border border-slate-700 bg-slate-800 text-3xl font-black text-white hover:bg-slate-700 active:scale-95 transition-all cursor-pointer"
+                    onClick={handleBackspace}
+                    className="min-w-[80px] min-h-[76px] flex flex-col items-center justify-center gap-1 rounded-2xl border border-slate-700 bg-slate-800/80 text-sm font-bold text-amber-300 hover:bg-slate-700 active:scale-95 transition-all cursor-pointer"
                   >
-                    {digit}
+                    <Delete className="h-6 w-6" />
+                    <span>Sudda</span>
                   </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={handleBackspace}
-                  className="min-w-[80px] min-h-[80px] flex flex-col items-center justify-center gap-1 rounded-2xl border border-slate-700 bg-slate-800/80 text-sm font-bold text-amber-300 hover:bg-slate-700 active:scale-95 transition-all cursor-pointer"
-                >
-                  <Delete className="h-6 w-6" />
-                  <span>Sudda</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDigit('0')}
-                  className="min-w-[80px] min-h-[80px] rounded-2xl border border-slate-700 bg-slate-800 text-3xl font-black text-white hover:bg-slate-700 active:scale-95 transition-all cursor-pointer"
-                >
-                  0
-                </button>
-                <button
-                  type="button"
-                  disabled={playerNumber.length === 0}
-                  onClick={handleNextFromPlayer}
-                  className="min-w-[80px] min-h-[80px] rounded-2xl border border-blue-400/50 bg-blue-600 text-lg font-black text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 transition-all cursor-pointer"
-                >
-                  Nästa →
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDigit('0')}
+                    className="min-w-[80px] min-h-[76px] rounded-2xl border border-slate-700 bg-slate-800 text-3xl font-black text-white hover:bg-slate-700 active:scale-95 transition-all cursor-pointer"
+                  >
+                    0
+                  </button>
+                  <button
+                    type="button"
+                    disabled={playerNumber.length === 0}
+                    onClick={handleNextFromPlayer}
+                    className="min-w-[80px] min-h-[76px] rounded-2xl border border-blue-400/50 bg-blue-600 text-lg font-black text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 transition-all cursor-pointer"
+                  >
+                    Nästa →
+                  </button>
+                </div>
+
+                <RosterQuickSelect
+                  roster={effectiveRoster}
+                  filterQuery={playerNumber}
+                  onSelectPlayer={handleSelectPlayerChip}
+                  teamColor={team.color}
+                />
               </div>
 
               {/* Team Penalty Shortcut */}
-              <div className="flex justify-center pt-2">
+              <div className="flex justify-center pt-1">
                 <button
                   type="button"
                   onClick={handleSelectTeamPenalty}
@@ -288,7 +373,10 @@ export const PenaltyFlowModal = forwardRef<
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <button
                   type="button"
-                  onClick={() => setStep('player')}
+                  onClick={() => {
+                    setInlinePlayerName('');
+                    setStep('player');
+                  }}
                   className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-sm font-bold text-slate-200 hover:bg-slate-700 cursor-pointer"
                 >
                   <ArrowLeft className="h-4 w-4" />
@@ -360,7 +448,7 @@ export const PenaltyFlowModal = forwardRef<
 
           {/* STEP 3: TELEPROMPTER SCRIPT */}
           {step === 'script' && (
-            <div className="space-y-8">
+            <div className="space-y-6">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <button
                   type="button"
@@ -381,6 +469,16 @@ export const PenaltyFlowModal = forwardRef<
                   &ldquo;{scriptText}&rdquo;
                 </p>
               </div>
+
+              {!isTeamPenalty && playerNumber && (
+                <MissingPlayersScriptPanel
+                  roster={effectiveRoster}
+                  players={[
+                    { roleLabel: 'Utvisad spelare', number: playerNumber },
+                  ]}
+                  onSavePlayer={handleSavePlayerName}
+                />
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
                 <button

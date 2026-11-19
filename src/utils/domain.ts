@@ -735,6 +735,100 @@ export function formatMsToMmSs(ms: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
+export function normalizeJerseyNumber(input: string): string {
+  if (typeof input !== 'string') {
+    return '';
+  }
+
+  let cleaned = input.trim();
+  if (!cleaned) {
+    return '';
+  }
+
+  let prev: string;
+  do {
+    prev = cleaned;
+    cleaned = cleaned
+      .replace(/^#+\s*/, '')
+      .replace(/^(?:nr|no)(?=$|[\s.:,\-–—#\d])\.?\s*/i, '')
+      .replace(/^[\s.:,\-–—]+/, '')
+      .replace(/[\s.:,\-–—]+$/, '')
+      .trim();
+  } while (cleaned !== prev);
+
+  cleaned = cleaned.replace(/[\s.:,]+/g, '');
+  return cleaned;
+}
+
+export function lookupPlayerName(
+  roster: Record<string, string> | undefined,
+  jerseyNumber: string,
+): string | undefined {
+  if (!roster || typeof jerseyNumber !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = jerseyNumber.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const nonEmptyName = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.trim() ? value.trim() : undefined;
+
+  if (Object.prototype.hasOwnProperty.call(roster, trimmed)) {
+    const exactMatch = nonEmptyName(roster[trimmed]);
+    if (exactMatch) {
+      return exactMatch;
+    }
+  }
+
+  const normalized = normalizeJerseyNumber(trimmed);
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (
+    normalized !== trimmed &&
+    Object.prototype.hasOwnProperty.call(roster, normalized)
+  ) {
+    const normalizedMatch = nonEmptyName(roster[normalized]);
+    if (normalizedMatch) {
+      return normalizedMatch;
+    }
+  }
+
+  const entries = Object.entries(roster);
+  for (const [key, value] of entries) {
+    if (normalizeJerseyNumber(key) === normalized) {
+      const scanMatch = nonEmptyName(value);
+      if (scanMatch) {
+        return scanMatch;
+      }
+    }
+  }
+
+  if (/^\d+$/.test(normalized)) {
+    const targetInt = Number.parseInt(normalized, 10);
+    if (Number.isFinite(targetInt) && targetInt > 0) {
+      for (const [key, value] of entries) {
+        const normKey = normalizeJerseyNumber(key);
+        if (/^\d+$/.test(normKey)) {
+          const keyInt = Number.parseInt(normKey, 10);
+          if (Number.isFinite(keyInt) && keyInt > 0 && keyInt === targetInt) {
+            const intMatch = nonEmptyName(value);
+            if (intMatch) {
+              return intMatch;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
 export function parseRosterText(text: string): Record<string, string> {
   if (typeof text !== 'string' || !text.trim()) {
     return {};
@@ -743,22 +837,68 @@ export function parseRosterText(text: string): Record<string, string> {
   const roster: Record<string, string> = {};
   const lines = text.split(/\r?\n/);
 
+  const prefixPattern =
+    /^(?:(?:nr|no)\.?\s*[:.\-#]*|#\s*)*(\d+)\s*[.\s,;:\-–—\t]+\s*(.+)$/i;
+  const suffixParenPattern =
+    /^(.+?)\s*\(\s*(?:#\s*|(?:nr|no)\.?\s*[:.\-#]*\s*)?(\d+)\s*\)\s*$/i;
+  const suffixTagPattern =
+    /^(.+?)[\s,;:\-–—\t]+(?:#\s*|(?:nr|no)\.?\s*[:.\-#]*\s*)(\d+)\s*[.,:]?\s*$/i;
+  const suffixBarePattern = /^(.+?)[\s,;:\-–—\t]+(\d{1,3})\s*$/;
+
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line) {
       continue;
     }
 
-    const match = /^#?(\d+)[\s,;:\-–—\t]+(.+)$/.exec(line);
-    if (!match) {
+    let rawNumber = '';
+    let rawName = '';
+
+    const prefixMatch = prefixPattern.exec(line);
+    if (prefixMatch) {
+      rawNumber = prefixMatch[1];
+      rawName = prefixMatch[2];
+    } else {
+      const parenMatch = suffixParenPattern.exec(line);
+      if (parenMatch) {
+        rawName = parenMatch[1];
+        rawNumber = parenMatch[2];
+      } else {
+        const tagMatch = suffixTagPattern.exec(line);
+        if (tagMatch) {
+          rawName = tagMatch[1];
+          rawNumber = tagMatch[2];
+        } else {
+          const bareMatch = suffixBarePattern.exec(line);
+          if (bareMatch) {
+            rawName = bareMatch[1];
+            rawNumber = bareMatch[2];
+          }
+        }
+      }
+    }
+
+    if (!rawNumber || !rawName) {
       continue;
     }
 
-    const jerseyNumber = match[1];
-    const playerName = match[2].replace(/\s+/g, ' ').trim();
-    if (jerseyNumber && playerName) {
-      roster[jerseyNumber] = playerName;
+    const jerseyNumber = normalizeJerseyNumber(rawNumber);
+    const playerName = rawName
+      .replace(/\t+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/^[\s\-–—:,;]+/, '')
+      .trim();
+
+    if (
+      !jerseyNumber ||
+      !playerName ||
+      /^(?:nr|no)\.?$/i.test(playerName) ||
+      !/[a-zA-ZåäöÅÄÖ]/.test(playerName)
+    ) {
+      continue;
     }
+
+    roster[jerseyNumber] = playerName;
   }
 
   return roster;
@@ -839,13 +979,19 @@ export function generatePenaltyScript(
     playerNumber?: string;
     playerName?: string;
     isTeamPenalty?: boolean;
+    roster?: Record<string, string>;
   },
 ): string {
   const team = params.teamName.trim() || 'Laget';
   const duration = params.duration.trim() || '2 minuter';
   const reason = params.penaltyLabel.trim() || 'utvisning';
-  const playerNumber = params.playerNumber?.trim() ?? '';
-  const playerName = params.playerName?.trim() ?? '';
+  const rawPlayerNumber = params.playerNumber?.trim() ?? '';
+  const playerNumber =
+    normalizeJerseyNumber(rawPlayerNumber) || rawPlayerNumber;
+  const playerName =
+    params.playerName?.trim() ||
+    (playerNumber ? lookupPlayerName(params.roster, playerNumber) : undefined) ||
+    '';
 
   if (params.isTeamPenalty || !playerNumber) {
     const template =
@@ -863,14 +1009,18 @@ export function generatePenaltyScript(
     settings.scriptTemplates.penalty || DEFAULT_SETTINGS.scriptTemplates.penalty;
 
   if (!playerName) {
-    template = template.replace(/,?\s*\{name\}/g, '');
+    template = template.replace(/,?\s*\{(?:name|playerName|scorerName)\}/g, '');
   }
 
   return cleanScriptPunctuation(
     template
       .replaceAll('{team}', team)
       .replaceAll('{number}', playerNumber)
+      .replaceAll('{playerNumber}', playerNumber)
+      .replaceAll('{scorerNumber}', playerNumber)
       .replaceAll('{name}', playerName)
+      .replaceAll('{playerName}', playerName)
+      .replaceAll('{scorerName}', playerName)
       .replaceAll('{duration}', duration)
       .replaceAll('{reason}', reason),
   );
@@ -883,17 +1033,30 @@ export function generateGoalScript(
     scorerNumber: string;
     scorerName?: string;
     assists?: Array<{ number: string; name?: string }>;
+    roster?: Record<string, string>;
   },
 ): string {
   const team = params.teamName.trim() || 'Laget';
-  const scorerNumber = params.scorerNumber.trim() || '?';
-  const scorerName = params.scorerName?.trim() ?? '';
+  const rawScorerNumber = params.scorerNumber?.trim() ?? '';
+  const scorerNumber =
+    normalizeJerseyNumber(rawScorerNumber) || rawScorerNumber || '?';
+  const scorerName =
+    params.scorerName?.trim() ||
+    (scorerNumber !== '?'
+      ? lookupPlayerName(params.roster, scorerNumber)
+      : undefined) ||
+    '';
 
   const validAssists = (params.assists ?? [])
-    .map((assist) => ({
-      number: assist.number.trim(),
-      name: assist.name?.trim() ?? '',
-    }))
+    .map((assist) => {
+      const rawAssistNum = assist.number?.trim() ?? '';
+      const number = normalizeJerseyNumber(rawAssistNum) || rawAssistNum;
+      const name =
+        assist.name?.trim() ||
+        (number ? lookupPlayerName(params.roster, number) : undefined) ||
+        '';
+      return { number, name };
+    })
     .filter((assist) => assist.number.length > 0);
 
   const formattedAssists = validAssists.map((assist) =>
@@ -919,15 +1082,34 @@ export function generateGoalScript(
         DEFAULT_SETTINGS.scriptTemplates.goalWithAssist
       : settings.scriptTemplates.goal || DEFAULT_SETTINGS.scriptTemplates.goal;
 
-  if (!scorerName) {
-    template = template.replace(/,?\s*\{scorerName\}/g, '');
+  const hasGoalNamePlaceholder =
+    template.includes('{scorerName}') ||
+    template.includes('{name}') ||
+    template.includes('{playerName}');
+
+  if (scorerName) {
+    if (!hasGoalNamePlaceholder && template.includes('{scorerNumber}')) {
+      template = template.replaceAll(
+        '{scorerNumber}',
+        '{scorerNumber}, {scorerName}',
+      );
+    }
+  } else {
+    template = template.replace(
+      /,?\s*\{(?:scorerName|name|playerName)\}/g,
+      '',
+    );
   }
 
   return cleanScriptPunctuation(
     template
       .replaceAll('{team}', team)
       .replaceAll('{scorerNumber}', scorerNumber)
+      .replaceAll('{number}', scorerNumber)
+      .replaceAll('{playerNumber}', scorerNumber)
       .replaceAll('{scorerName}', scorerName)
+      .replaceAll('{name}', scorerName)
+      .replaceAll('{playerName}', scorerName)
       .replaceAll('{assists}', assistsText),
   );
 }
@@ -1391,6 +1573,17 @@ export function syncPadsWithKeyBindings(
   });
 }
 
+function sanitizeRosterRecord(rawRoster: Record<string, unknown>): Record<string, string> {
+  const roster: Record<string, string> = {};
+  for (const [key, val] of Object.entries(rawRoster)) {
+    const num = normalizeJerseyNumber(key);
+    if (num && typeof val === 'string' && val.trim()) {
+      roster[num] = val.trim();
+    }
+  }
+  return roster;
+}
+
 function sanitizeTeam(
   rawTeam: unknown,
   id: 'home' | 'away',
@@ -1410,17 +1603,9 @@ function sanitizeTeam(
       ? rawTeam.color.trim()
       : fallback.color;
 
-  const roster: Record<string, string> = {};
-  if (isPlainObject(rawTeam.roster)) {
-    for (const [key, val] of Object.entries(rawTeam.roster)) {
-      const num = key.trim();
-      if (num && typeof val === 'string' && val.trim()) {
-        roster[num] = val.trim();
-      }
-    }
-  } else {
-    Object.assign(roster, fallback.roster);
-  }
+  const roster = isPlainObject(rawTeam.roster)
+    ? sanitizeRosterRecord(rawTeam.roster)
+    : { ...fallback.roster };
 
   return {
     id,
@@ -1775,15 +1960,9 @@ export function sanitizeSavedRoster(
       ? rawRoster.ageGroupOrClub.trim()
       : undefined;
 
-  const roster: Record<string, string> = {};
-  if (isPlainObject(rawRoster.roster)) {
-    for (const [key, val] of Object.entries(rawRoster.roster)) {
-      const num = key.trim();
-      if (num && typeof val === 'string' && val.trim()) {
-        roster[num] = val.trim();
-      }
-    }
-  }
+  const roster = isPlainObject(rawRoster.roster)
+    ? sanitizeRosterRecord(rawRoster.roster)
+    : {};
 
   const updatedAt =
     typeof rawRoster.updatedAt === 'string' && rawRoster.updatedAt.trim()

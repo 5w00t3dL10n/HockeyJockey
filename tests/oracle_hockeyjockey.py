@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, section 4.2 of 13_oracle_local_audio_files_init.md, AND section 4.2 of 15_oracle_embedded_media_archive_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, section 4.2 of 13_oracle_local_audio_files_init.md, section 4.2 of 15_oracle_embedded_media_archive_init.md, AND section 4.2 of 17_oracle_roster_lookup_and_teleprompter_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
@@ -22,6 +22,7 @@ Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 
 18. Zustand `useAppStore` full JSON export/import round-trip with local audio tracks (`sourceType: 'local'`, `localFileName`, `mimeType`).
 19. Embedded media archive directory `src/media` existence, audio file filtering, `registerEmbeddedMediaItems`, `syncEmbeddedMediaArchive`, `getLocalAudioPlaybackUrl`, and `getLocalAudioRecord`.
 20. Zustand `useAppStore.importEmbeddedMediaArchive` auto-creation in `'media_archive'` group, idempotency on repeated loads, user-deletion respect, and `resetToDefaults()` isolation.
+21. `DEFAULT_TEAMS.home` (*Sundsvall Hockey*) default roster (`#12`, `#6`, `#22`, `#00`), `useAppStore.upsertPlayer` jersey normalization (`'#12'` -> `'12'`), and `generateGoalScript` / `generatePenaltyScript` teleprompter output with full player names.
 
 Deterministic exit codes:
 - 0: All oracle checks passed.
@@ -3289,6 +3290,169 @@ try {
         raise AssertionError(f"Empty importEmbeddedMediaArchive([]) behavior mismatch: {res['emptyResult']!r}, {res['embeddedAfterEmpty']!r}")
 
 
+def check_roster_lookup_and_teleprompter() -> None:
+    """Oracle 21: Verify DEFAULT_TEAMS.home roster (#12, #6, #22, #00), upsertPlayer normalization, and teleprompter full-name output."""
+    script = """
+import { DEFAULT_SETTINGS, DEFAULT_TEAMS } from './src/data/defaults.ts';
+import { useAppStore } from './src/store/useAppStore.ts';
+import {
+  generateGoalScript,
+  generatePenaltyScript,
+  lookupPlayerName,
+} from './src/utils/domain.ts';
+
+useAppStore.getState().resetToDefaults();
+
+try {
+  const defaultHomeTeam = {
+    name: DEFAULT_TEAMS.home.name,
+    roster: { ...DEFAULT_TEAMS.home.roster },
+  };
+
+  const lookupHash12 = lookupPlayerName(DEFAULT_TEAMS.home.roster, '#12') ?? null;
+  const lookupPadded06 = lookupPlayerName(DEFAULT_TEAMS.home.roster, '06') ?? null;
+  const lookupNr22 = lookupPlayerName(DEFAULT_TEAMS.home.roster, 'Nr 22') ?? null;
+  const lookupZeroZero = lookupPlayerName(DEFAULT_TEAMS.home.roster, '00') ?? null;
+  const lookupSingleZero = lookupPlayerName(DEFAULT_TEAMS.home.roster, '0') ?? null;
+
+  const goalScriptDefaultTpl = generateGoalScript(DEFAULT_SETTINGS, {
+    teamName: DEFAULT_TEAMS.home.name,
+    scorerNumber: '#12',
+    assists: [{ number: '#6' }],
+    roster: DEFAULT_TEAMS.home.roster,
+  });
+
+  const goalScriptMissingScorerNameTpl = generateGoalScript(
+    {
+      ...DEFAULT_SETTINGS,
+      scriptTemplates: {
+        ...DEFAULT_SETTINGS.scriptTemplates,
+        goalWithAssist: 'Mål för {team}! Målskytt nummer {scorerNumber}. Framspelad av {assists}.',
+      },
+    },
+    {
+      teamName: DEFAULT_TEAMS.home.name,
+      scorerNumber: '#12',
+      assists: [{ number: '06' }],
+      roster: DEFAULT_TEAMS.home.roster,
+    },
+  );
+
+  const penaltyScriptDefaultRoster = generatePenaltyScript(DEFAULT_SETTINGS, {
+    teamName: DEFAULT_TEAMS.home.name,
+    penaltyLabel: 'Tripping',
+    duration: '2 minuter',
+    playerNumber: '#22',
+    roster: DEFAULT_TEAMS.home.roster,
+  });
+
+  // Verify useAppStore.upsertPlayer normalizes '#12' -> '12' and 'Nr 6' -> '6'
+  useAppStore.getState().upsertPlayer('home', '#12', 'Kalle Svensson (Kapten)');
+  useAppStore.getState().upsertPlayer('home', 'Nr 6', 'Erik Lind (Ass)');
+  const homeRosterAfterUpsert = { ...useAppStore.getState().teams.home.roster };
+
+  // Cleanly restore via resetToDefaults()
+  useAppStore.getState().resetToDefaults();
+  const homeRosterAfterReset = { ...useAppStore.getState().teams.home.roster };
+
+  console.log(JSON.stringify({
+    defaultHomeTeam,
+    lookupHash12,
+    lookupPadded06,
+    lookupNr22,
+    lookupZeroZero,
+    lookupSingleZero,
+    goalScriptDefaultTpl,
+    goalScriptMissingScorerNameTpl,
+    penaltyScriptDefaultRoster,
+    homeRosterAfterUpsert,
+    homeRosterAfterReset,
+  }));
+} finally {
+  useAppStore.getState().resetToDefaults();
+}
+"""
+    res = run_ts_script(script)
+
+    default_home = res["defaultHomeTeam"]
+    if default_home["name"] != "Sundsvall Hockey":
+        raise AssertionError(f"Expected DEFAULT_TEAMS.home.name === 'Sundsvall Hockey', got {default_home['name']!r}")
+
+    default_roster = default_home["roster"]
+    for jersey in ("12", "6", "22", "00"):
+        player_name = default_roster.get(jersey)
+        if not isinstance(player_name, str) or not player_name.strip():
+            raise AssertionError(
+                f"DEFAULT_TEAMS.home.roster missing non-empty player for #{jersey}: {default_roster!r}"
+            )
+
+    expected_12 = default_roster["12"]
+    expected_6 = default_roster["6"]
+    expected_22 = default_roster["22"]
+    expected_00 = default_roster["00"]
+
+    if res["lookupHash12"] != expected_12:
+        raise AssertionError(f"lookupPlayerName('#12') mismatch: expected {expected_12!r}, got {res['lookupHash12']!r}")
+    if res["lookupPadded06"] != expected_6:
+        raise AssertionError(f"lookupPlayerName('06') mismatch: expected {expected_6!r}, got {res['lookupPadded06']!r}")
+    if res["lookupNr22"] != expected_22:
+        raise AssertionError(f"lookupPlayerName('Nr 22') mismatch: expected {expected_22!r}, got {res['lookupNr22']!r}")
+    if res["lookupZeroZero"] != expected_00:
+        raise AssertionError(f"lookupPlayerName('00') mismatch: expected {expected_00!r}, got {res['lookupZeroZero']!r}")
+    if res["lookupSingleZero"] is not None:
+        raise AssertionError(f"lookupPlayerName('0') must remain strictly distinct from '00', got {res['lookupSingleZero']!r}")
+
+    expected_goal_default = (
+        f"Mål för Sundsvall Hockey! Målskytt nummer 12, {expected_12}. "
+        f"Framspelad av nummer 6 {expected_6}."
+    )
+    expected_goal_missing_tpl = (
+        f"Mål för Sundsvall Hockey! Målskytt nummer 12, {expected_12}. "
+        f"Framspelad av nummer 06 {expected_6}."
+    )
+    for label, actual_script, expected_script in (
+        ("DEFAULT_SETTINGS", res["goalScriptDefaultTpl"], expected_goal_default),
+        ("template missing {scorerName}", res["goalScriptMissingScorerNameTpl"], expected_goal_missing_tpl),
+    ):
+        if actual_script != expected_script:
+            raise AssertionError(
+                f"generateGoalScript ({label}) mismatch:\nEXPECTED: {expected_script!r}\nACTUAL:   {actual_script!r}"
+            )
+        if expected_12 not in actual_script or expected_6 not in actual_script:
+            raise AssertionError(
+                f"generateGoalScript ({label}) did not produce full player names: {actual_script!r}"
+            )
+        if "{" in actual_script or "}" in actual_script:
+            raise AssertionError(
+                f"generateGoalScript ({label}) left unreplaced placeholders: {actual_script!r}"
+            )
+
+    expected_penalty_script = (
+        f"Sundsvall Hockey drar på sig en utvisning genom nummer 22, {expected_22}, 2 minuter för Tripping."
+    )
+    if res["penaltyScriptDefaultRoster"] != expected_penalty_script:
+        raise AssertionError(
+            f"generatePenaltyScript mismatch:\nEXPECTED: {expected_penalty_script!r}\nACTUAL:   {res['penaltyScriptDefaultRoster']!r}"
+        )
+
+    after_upsert = res["homeRosterAfterUpsert"]
+    if "#12" in after_upsert or "Nr 6" in after_upsert:
+        raise AssertionError(f"upsertPlayer stored unnormalized jersey key: {after_upsert!r}")
+    if after_upsert.get("12") != "Kalle Svensson (Kapten)":
+        raise AssertionError(
+            f"upsertPlayer('#12', ...) did not normalize to key '12': {after_upsert!r}"
+        )
+    if after_upsert.get("6") != "Erik Lind (Ass)":
+        raise AssertionError(
+            f"upsertPlayer('Nr 6', ...) did not normalize to key '6': {after_upsert!r}"
+        )
+
+    if res["homeRosterAfterReset"] != default_roster:
+        raise AssertionError(
+            f"resetToDefaults() did not cleanly restore home roster: {res['homeRosterAfterReset']!r}"
+        )
+
+
 def main() -> int:
     checks = [
         ("1. Production build & dist/ artifacts", check_production_build),
@@ -3311,6 +3475,7 @@ def main() -> int:
         ("18. Store full JSON export/import round-trip with local audio tracks", check_store_local_audio_json_roundtrip),
         ("19. Embedded media archive dir src/media, filtering & localAudioStorage streamUrl resolution", check_embedded_media_archive_dir_and_storage),
         ("20. Store importEmbeddedMediaArchive auto-pads in 'media_archive', idempotency & deletion respect", check_store_embedded_media_archive_idempotency),
+        ("21. DEFAULT_TEAMS.home roster (#12, #6, #22, #00), upsertPlayer normalization & teleprompter full-name output", check_roster_lookup_and_teleprompter),
     ]
 
     for label, fn in checks:

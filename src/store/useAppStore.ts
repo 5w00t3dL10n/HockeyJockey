@@ -31,6 +31,7 @@ import {
   exportMatchConfig,
   importMatchConfig,
   isLocalAudioUri,
+  normalizeJerseyNumber,
   parseRosterText,
   sanitizeKeyBindings,
   sanitizeMatchConfig,
@@ -282,7 +283,7 @@ export const useAppStore = create<AppStoreState>()(
         })),
 
       upsertPlayer: (teamId, playerNumber, playerName) => {
-        const cleanNum = playerNumber.trim();
+        const cleanNum = normalizeJerseyNumber(playerNumber);
         const cleanName = playerName.trim();
         if (!cleanNum || !cleanName) {
           return;
@@ -304,7 +305,11 @@ export const useAppStore = create<AppStoreState>()(
       removePlayer: (teamId, playerNumber) =>
         set((state) => {
           const nextRoster = { ...state.teams[teamId].roster };
+          const normalized = normalizeJerseyNumber(playerNumber);
           delete nextRoster[playerNumber];
+          if (normalized) {
+            delete nextRoster[normalized];
+          }
           return {
             teams: {
               ...state.teams,

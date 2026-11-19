@@ -54,6 +54,7 @@ export function App() {
   const updateSettings = useAppStore((s) => s.updateSettings);
   const loadRosterFromLibrary = useAppStore((s) => s.loadRosterFromLibrary);
   const activateMatchProfile = useAppStore((s) => s.activateMatchProfile);
+  const upsertPlayer = useAppStore((s) => s.upsertPlayer);
 
   const modalRef = useRef<ModalKeyboardHandle | null>(null);
   const oauthHandledRef = useRef(false);
@@ -414,6 +415,9 @@ export function App() {
           ref={modalRef}
           team={teams[activeModal.teamId]}
           settings={settings}
+          onUpsertPlayer={(playerNumber, playerName) =>
+            upsertPlayer(activeModal.teamId, playerNumber, playerName)
+          }
           onStartPenaltyMusic={handleStartPenaltyMusic}
           onDuckAudio={() =>
             void audioController.duckVolume(settings.duckVolume, 400)
@@ -437,6 +441,9 @@ export function App() {
           team={teams[activeModal.teamId]}
           settings={settings}
           isMusicPlaying={audioState.isPlaying}
+          onUpsertPlayer={(playerNumber, playerName) =>
+            upsertPlayer(activeModal.teamId, playerNumber, playerName)
+          }
           onStartHomeGoalMusic={handleStartHomeGoalMusic}
           onStartAwayRestartMusic={handleStartAwayRestartMusic}
           onToggleAwayGoalSilence={() =>

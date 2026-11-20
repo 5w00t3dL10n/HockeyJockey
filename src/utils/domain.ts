@@ -26,6 +26,8 @@ import type {
   Team,
   TrackCue,
   TrackSourceType,
+  TtsAudioProfile,
+  TtsDspChainConfig,
   TtsEngineType,
 } from '../types/models.ts';
 
@@ -53,7 +55,10 @@ const VALID_TRIGGER_FLOWS = new Set([
 export const PIPER_VOICE_IDS = [
   'sv_SE-nst-medium',
   'sv_SE-lisa-medium',
+  'sv_SE-alma-medium',
 ] as const;
+
+export const TTS_AUDIO_PROFILES = ['studio', 'booth', 'arena_pa'] as const;
 
 export function isValidPiperVoiceId(id: string): id is PiperVoiceId {
   return (
@@ -66,12 +71,235 @@ export function isValidTtsEngine(engine: unknown): engine is TtsEngineType {
   return engine === 'piper' || engine === 'webspeech';
 }
 
+export function isValidTtsAudioProfile(
+  value: unknown,
+): value is TtsAudioProfile {
+  return (
+    typeof value === 'string' &&
+    (TTS_AUDIO_PROFILES as readonly string[]).includes(value)
+  );
+}
+
+export function getPiperVoiceShortLabel(voiceId: PiperVoiceId): string {
+  switch (voiceId) {
+    case 'sv_SE-lisa-medium':
+      return 'Lisa';
+    case 'sv_SE-alma-medium':
+      return 'Alma';
+    case 'sv_SE-nst-medium':
+    default:
+      return 'NST';
+  }
+}
+
+export function getTtsAudioProfileLabel(profile: TtsAudioProfile): string {
+  switch (profile) {
+    case 'studio':
+      return 'Ren / Studio';
+    case 'booth':
+      return 'Radiospeaker / Båset';
+    case 'arena_pa':
+    default:
+      return 'Ishall PA';
+  }
+}
+
 export function calculatePiperLengthScale(rate: number): number {
   const safeRate =
     typeof rate === 'number' && Number.isFinite(rate) && rate > 0
       ? Math.min(2.0, Math.max(0.5, rate))
       : 1.0;
   return Number((1 / safeRate).toFixed(3));
+}
+
+export function calculatePiperProsodyParams(options?: {
+  rate?: number;
+  sentenceSilenceSec?: number;
+  expressiveness?: number;
+}): {
+  lengthScale: number;
+  sentenceSilence: number;
+  noiseScale: number;
+  noiseW: number;
+} {
+  const lengthScale = calculatePiperLengthScale(options?.rate ?? 1.0);
+  const sentenceSilence = Number(
+    clampNumber(
+      toNumericInput(options?.sentenceSilenceSec),
+      0.1,
+      1.5,
+      0.65,
+    ).toFixed(3),
+  );
+  const noiseScale = Number(
+    clampNumber(
+      toNumericInput(options?.expressiveness),
+      0.3,
+      1.2,
+      0.75,
+    ).toFixed(3),
+  );
+  const noiseW = Number(
+    clampNumber(
+      0.8 + (noiseScale - 0.667) * 0.4,
+      0.5,
+      1.1,
+      0.833,
+    ).toFixed(3),
+  );
+
+  return {
+    lengthScale,
+    sentenceSilence,
+    noiseScale,
+    noiseW,
+  };
+}
+
+export function formatTextForArenaProsody(
+  text: string,
+  dramaticPauses = true,
+): string {
+  if (typeof text !== 'string') {
+    return '';
+  }
+
+  let formatted = text.replace(/\s+/g, ' ').trim();
+  if (!formatted) {
+    return '';
+  }
+
+  formatted = formatted
+    .replace(/#\s*(\d+)/g, 'nummer $1')
+    .replace(/\bnr\.?\s*(\d+)\b/gi, 'nummer $1')
+    .replace(/\b(\d+)\s*min\.?(?=$|[\s,.;:!?)])/gi, '$1 minuter');
+
+  if (dramaticPauses) {
+    formatted = formatted
+      .replace(/\b(nummer\s+\d+)\s*,\s*/gi, '$1. ')
+      .replace(
+        /\s*(?:,\s*)?\b(Målskytt|Framspelad\s+av|Assisterad\s+av)\b/gi,
+        (_match, phrase: string, offset: number) =>
+          offset === 0 ? phrase : `. ${phrase}`,
+      )
+      .replace(
+        /\b(Målskytt|Framspelad\s+av|Assisterad\s+av)\b(?=\s+[^\s,.:;!?])/gi,
+        '$1,',
+      )
+      .replace(
+        /\s*(?:,\s*)?(\b\d+\s+minuter\s+för\b)/gi,
+        (_match, phrase: string, offset: number) =>
+          offset === 0 ? phrase : `. ${phrase}`,
+      )
+      .replace(/([!?])\s*[.,;]+/g, '$1')
+      .replace(/,\s*([.!?])/g, '$1')
+      .replace(/\.{2,}/g, '.')
+      .replace(/,{2,}/g, ',')
+      .replace(/\s+([.,!?])/g, '$1')
+      .replace(/([.,!?])(?=[A-Za-zÅÄÖåäö])/g, '$1 ');
+  }
+
+  return formatted.replace(/\s+/g, ' ').trim();
+}
+
+export function computeTtsDspChainConfig(
+  profile: TtsAudioProfile,
+  arenaReverbMix = 0.28,
+): TtsDspChainConfig {
+  const safeProfile: TtsAudioProfile = isValidTtsAudioProfile(profile)
+    ? profile
+    : 'arena_pa';
+  const clampedMix = Number(
+    clampNumber(toNumericInput(arenaReverbMix), 0.0, 0.8, 0.28).toFixed(3),
+  );
+
+  if (safeProfile === 'studio') {
+    return {
+      profile: 'studio',
+      bypass: true,
+      highpassHz: 20,
+      chestPeakHz: 210,
+      chestGainDb: 0,
+      chestQ: 1.1,
+      presencePeakHz: 3200,
+      presenceGainDb: 0,
+      presenceQ: 1.2,
+      deHarshLowpassHz: 20000,
+      deHarshQ: 0.707,
+      compressor: {
+        thresholdDb: 0,
+        kneeDb: 0,
+        ratio: 1,
+        attackSec: 0.004,
+        releaseSec: 0.16,
+        makeupGain: 1.0,
+      },
+      slapbackDelaySec: 0,
+      slapbackFeedback: 0,
+      reverbDurationSec: 0,
+      reverbDecay: 2.4,
+      wetMix: 0,
+      dryMix: 1.0,
+    };
+  }
+
+  if (safeProfile === 'booth') {
+    return {
+      profile: 'booth',
+      bypass: false,
+      highpassHz: 115,
+      chestPeakHz: 210,
+      chestGainDb: 3.0,
+      chestQ: 1.1,
+      presencePeakHz: 3200,
+      presenceGainDb: 3.2,
+      presenceQ: 1.2,
+      deHarshLowpassHz: 7400,
+      deHarshQ: 0.707,
+      compressor: {
+        thresholdDb: -22,
+        kneeDb: 10,
+        ratio: 4.5,
+        attackSec: 0.004,
+        releaseSec: 0.16,
+        makeupGain: 1.22,
+      },
+      slapbackDelaySec: 0,
+      slapbackFeedback: 0,
+      reverbDurationSec: 0,
+      reverbDecay: 2.4,
+      wetMix: 0,
+      dryMix: 1.0,
+    };
+  }
+
+  return {
+    profile: 'arena_pa',
+    bypass: false,
+    highpassHz: 115,
+    chestPeakHz: 210,
+    chestGainDb: 2.5,
+    chestQ: 1.1,
+    presencePeakHz: 3200,
+    presenceGainDb: 3.8,
+    presenceQ: 1.2,
+    deHarshLowpassHz: 7400,
+    deHarshQ: 0.707,
+    compressor: {
+      thresholdDb: -22,
+      kneeDb: 10,
+      ratio: 4.5,
+      attackSec: 0.004,
+      releaseSec: 0.16,
+      makeupGain: 1.22,
+    },
+    slapbackDelaySec: 0.085,
+    slapbackFeedback: 0.18,
+    reverbDurationSec: 1.35,
+    reverbDecay: 2.4,
+    wetMix: clampedMix,
+    dryMix: 1.0,
+  };
 }
 
 function toNumericInput(value: unknown): number {
@@ -1923,6 +2151,37 @@ function sanitizeSettings(
     typeof fallback.ttsRestoreMusicAfter === 'boolean'
       ? fallback.ttsRestoreMusicAfter
       : DEFAULT_SETTINGS.ttsRestoreMusicAfter;
+  const fallbackTtsAudioProfile =
+    typeof fallback.ttsAudioProfile === 'string' &&
+    isValidTtsAudioProfile(fallback.ttsAudioProfile)
+      ? fallback.ttsAudioProfile
+      : DEFAULT_SETTINGS.ttsAudioProfile;
+  const fallbackTtsDramaticPauses =
+    typeof fallback.ttsDramaticPauses === 'boolean'
+      ? fallback.ttsDramaticPauses
+      : DEFAULT_SETTINGS.ttsDramaticPauses;
+  const fallbackTtsSentenceSilenceSec = clampNumber(
+    toNumericInput(fallback.ttsSentenceSilenceSec),
+    0.1,
+    1.5,
+    DEFAULT_SETTINGS.ttsSentenceSilenceSec,
+  );
+  const fallbackTtsExpressiveness = clampNumber(
+    toNumericInput(fallback.ttsExpressiveness),
+    0.3,
+    1.2,
+    DEFAULT_SETTINGS.ttsExpressiveness,
+  );
+  const fallbackTtsArenaReverbMix = clampNumber(
+    toNumericInput(fallback.ttsArenaReverbMix),
+    0.0,
+    0.8,
+    DEFAULT_SETTINGS.ttsArenaReverbMix,
+  );
+  const fallbackTtsPreChimeEnabled =
+    typeof fallback.ttsPreChimeEnabled === 'boolean'
+      ? fallback.ttsPreChimeEnabled
+      : DEFAULT_SETTINGS.ttsPreChimeEnabled;
 
   if (!isPlainObject(rawSettings)) {
     return {
@@ -1937,6 +2196,12 @@ function sanitizeSettings(
       ttsVolume: fallbackTtsVolume,
       ttsAutoRead: fallbackTtsAutoRead,
       ttsRestoreMusicAfter: fallbackTtsRestoreMusicAfter,
+      ttsAudioProfile: fallbackTtsAudioProfile,
+      ttsDramaticPauses: fallbackTtsDramaticPauses,
+      ttsSentenceSilenceSec: fallbackTtsSentenceSilenceSec,
+      ttsExpressiveness: fallbackTtsExpressiveness,
+      ttsArenaReverbMix: fallbackTtsArenaReverbMix,
+      ttsPreChimeEnabled: fallbackTtsPreChimeEnabled,
       spotifyClientId: defaultClientId,
       keyBindings: sanitizeKeyBindings(
         undefined,
@@ -1983,6 +2248,14 @@ function sanitizeSettings(
           isValidPiperVoiceId(rawSettings.ttsVoiceId.trim())
         ? (rawSettings.ttsVoiceId.trim() as PiperVoiceId)
         : DEFAULT_SETTINGS.ttsVoiceId;
+
+  const resolvedTtsAudioProfile =
+    rawSettings.ttsAudioProfile === undefined
+      ? fallbackTtsAudioProfile
+      : typeof rawSettings.ttsAudioProfile === 'string' &&
+          isValidTtsAudioProfile(rawSettings.ttsAudioProfile.trim())
+        ? (rawSettings.ttsAudioProfile.trim() as TtsAudioProfile)
+        : DEFAULT_SETTINGS.ttsAudioProfile;
 
   return {
     duckVolume: clampNumber(
@@ -2041,6 +2314,33 @@ function sanitizeSettings(
       typeof rawSettings.ttsRestoreMusicAfter === 'boolean'
         ? rawSettings.ttsRestoreMusicAfter
         : fallbackTtsRestoreMusicAfter,
+    ttsAudioProfile: resolvedTtsAudioProfile,
+    ttsDramaticPauses:
+      typeof rawSettings.ttsDramaticPauses === 'boolean'
+        ? rawSettings.ttsDramaticPauses
+        : fallbackTtsDramaticPauses,
+    ttsSentenceSilenceSec: clampNumber(
+      toNumericInput(rawSettings.ttsSentenceSilenceSec),
+      0.1,
+      1.5,
+      fallbackTtsSentenceSilenceSec,
+    ),
+    ttsExpressiveness: clampNumber(
+      toNumericInput(rawSettings.ttsExpressiveness),
+      0.3,
+      1.2,
+      fallbackTtsExpressiveness,
+    ),
+    ttsArenaReverbMix: clampNumber(
+      toNumericInput(rawSettings.ttsArenaReverbMix),
+      0.0,
+      0.8,
+      fallbackTtsArenaReverbMix,
+    ),
+    ttsPreChimeEnabled:
+      typeof rawSettings.ttsPreChimeEnabled === 'boolean'
+        ? rawSettings.ttsPreChimeEnabled
+        : fallbackTtsPreChimeEnabled,
     spotifyClientId: rawClientId || defaultClientId,
     spotifyRedirectUri:
       typeof rawSettings.spotifyRedirectUri === 'string' &&
@@ -2254,6 +2554,49 @@ export function sanitizeMatchProfile(
 
     if (typeof rawSettings.ttsRestoreMusicAfter === 'boolean') {
       sanitizedSettings.ttsRestoreMusicAfter = rawSettings.ttsRestoreMusicAfter;
+    }
+
+    if (rawSettings.ttsAudioProfile !== undefined) {
+      sanitizedSettings.ttsAudioProfile =
+        typeof rawSettings.ttsAudioProfile === 'string' &&
+        isValidTtsAudioProfile(rawSettings.ttsAudioProfile.trim())
+          ? (rawSettings.ttsAudioProfile.trim() as TtsAudioProfile)
+          : DEFAULT_SETTINGS.ttsAudioProfile;
+    }
+
+    if (typeof rawSettings.ttsDramaticPauses === 'boolean') {
+      sanitizedSettings.ttsDramaticPauses = rawSettings.ttsDramaticPauses;
+    }
+
+    if (rawSettings.ttsSentenceSilenceSec !== undefined) {
+      sanitizedSettings.ttsSentenceSilenceSec = clampNumber(
+        toNumericInput(rawSettings.ttsSentenceSilenceSec),
+        0.1,
+        1.5,
+        DEFAULT_SETTINGS.ttsSentenceSilenceSec,
+      );
+    }
+
+    if (rawSettings.ttsExpressiveness !== undefined) {
+      sanitizedSettings.ttsExpressiveness = clampNumber(
+        toNumericInput(rawSettings.ttsExpressiveness),
+        0.3,
+        1.2,
+        DEFAULT_SETTINGS.ttsExpressiveness,
+      );
+    }
+
+    if (rawSettings.ttsArenaReverbMix !== undefined) {
+      sanitizedSettings.ttsArenaReverbMix = clampNumber(
+        toNumericInput(rawSettings.ttsArenaReverbMix),
+        0.0,
+        0.8,
+        DEFAULT_SETTINGS.ttsArenaReverbMix,
+      );
+    }
+
+    if (typeof rawSettings.ttsPreChimeEnabled === 'boolean') {
+      sanitizedSettings.ttsPreChimeEnabled = rawSettings.ttsPreChimeEnabled;
     }
 
     if (isPlainObject(rawSettings.scriptTemplates)) {

@@ -32,6 +32,7 @@ import {
   importMatchConfig,
   isLocalAudioUri,
   isValidPiperVoiceId,
+  isValidTtsAudioProfile,
   isValidTtsEngine,
   normalizeJerseyNumber,
   parseRosterText,
@@ -141,6 +142,18 @@ function cloneTeams(teams: { home: Team; away: Team }): {
       roster: { ...teams.away.roster },
     },
   };
+}
+
+function clampFiniteSetting(
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.min(max, Math.max(min, value));
+  }
+  return fallback;
 }
 
 function createInitialSnapshot(): MatchConfigSnapshot {
@@ -759,6 +772,39 @@ export const useAppStore = create<AppStoreState>()(
             typeof updates.ttsRestoreMusicAfter === 'boolean'
               ? updates.ttsRestoreMusicAfter
               : state.settings.ttsRestoreMusicAfter;
+          const nextTtsAudioProfile =
+            updates.ttsAudioProfile !== undefined
+              ? typeof updates.ttsAudioProfile === 'string' &&
+                isValidTtsAudioProfile(updates.ttsAudioProfile)
+                ? updates.ttsAudioProfile
+                : DEFAULT_SETTINGS.ttsAudioProfile
+              : state.settings.ttsAudioProfile;
+          const nextTtsDramaticPauses =
+            typeof updates.ttsDramaticPauses === 'boolean'
+              ? updates.ttsDramaticPauses
+              : state.settings.ttsDramaticPauses;
+          const nextTtsSentenceSilenceSec = clampFiniteSetting(
+            updates.ttsSentenceSilenceSec,
+            0.1,
+            1.5,
+            state.settings.ttsSentenceSilenceSec,
+          );
+          const nextTtsExpressiveness = clampFiniteSetting(
+            updates.ttsExpressiveness,
+            0.3,
+            1.2,
+            state.settings.ttsExpressiveness,
+          );
+          const nextTtsArenaReverbMix = clampFiniteSetting(
+            updates.ttsArenaReverbMix,
+            0.0,
+            0.8,
+            state.settings.ttsArenaReverbMix,
+          );
+          const nextTtsPreChimeEnabled =
+            typeof updates.ttsPreChimeEnabled === 'boolean'
+              ? updates.ttsPreChimeEnabled
+              : state.settings.ttsPreChimeEnabled;
           const nextSettings: AppSettings = {
             ...state.settings,
             ...updates,
@@ -771,6 +817,12 @@ export const useAppStore = create<AppStoreState>()(
             ttsVolume: nextTtsVolume,
             ttsAutoRead: nextTtsAutoRead,
             ttsRestoreMusicAfter: nextTtsRestoreMusicAfter,
+            ttsAudioProfile: nextTtsAudioProfile,
+            ttsDramaticPauses: nextTtsDramaticPauses,
+            ttsSentenceSilenceSec: nextTtsSentenceSilenceSec,
+            ttsExpressiveness: nextTtsExpressiveness,
+            ttsArenaReverbMix: nextTtsArenaReverbMix,
+            ttsPreChimeEnabled: nextTtsPreChimeEnabled,
             keyBindings: nextKeyBindings,
             soundboardGroups: nextSoundboardGroups,
           };
@@ -1037,6 +1089,12 @@ export const useAppStore = create<AppStoreState>()(
             ttsVolume: state.settings.ttsVolume,
             ttsAutoRead: state.settings.ttsAutoRead,
             ttsRestoreMusicAfter: state.settings.ttsRestoreMusicAfter,
+            ttsAudioProfile: state.settings.ttsAudioProfile,
+            ttsDramaticPauses: state.settings.ttsDramaticPauses,
+            ttsSentenceSilenceSec: state.settings.ttsSentenceSilenceSec,
+            ttsExpressiveness: state.settings.ttsExpressiveness,
+            ttsArenaReverbMix: state.settings.ttsArenaReverbMix,
+            ttsPreChimeEnabled: state.settings.ttsPreChimeEnabled,
             scriptTemplates: { ...state.settings.scriptTemplates },
             keyBindings: clonedBindings,
             soundboardGroups: clonedGroups,
@@ -1144,6 +1202,39 @@ export const useAppStore = create<AppStoreState>()(
             typeof profile.settings?.ttsRestoreMusicAfter === 'boolean'
               ? profile.settings.ttsRestoreMusicAfter
               : state.settings.ttsRestoreMusicAfter,
+          ttsAudioProfile:
+            profile.settings?.ttsAudioProfile !== undefined
+              ? typeof profile.settings.ttsAudioProfile === 'string' &&
+                isValidTtsAudioProfile(profile.settings.ttsAudioProfile)
+                ? profile.settings.ttsAudioProfile
+                : DEFAULT_SETTINGS.ttsAudioProfile
+              : state.settings.ttsAudioProfile,
+          ttsDramaticPauses:
+            typeof profile.settings?.ttsDramaticPauses === 'boolean'
+              ? profile.settings.ttsDramaticPauses
+              : state.settings.ttsDramaticPauses,
+          ttsSentenceSilenceSec: clampFiniteSetting(
+            profile.settings?.ttsSentenceSilenceSec,
+            0.1,
+            1.5,
+            state.settings.ttsSentenceSilenceSec,
+          ),
+          ttsExpressiveness: clampFiniteSetting(
+            profile.settings?.ttsExpressiveness,
+            0.3,
+            1.2,
+            state.settings.ttsExpressiveness,
+          ),
+          ttsArenaReverbMix: clampFiniteSetting(
+            profile.settings?.ttsArenaReverbMix,
+            0.0,
+            0.8,
+            state.settings.ttsArenaReverbMix,
+          ),
+          ttsPreChimeEnabled:
+            typeof profile.settings?.ttsPreChimeEnabled === 'boolean'
+              ? profile.settings.ttsPreChimeEnabled
+              : state.settings.ttsPreChimeEnabled,
           scriptTemplates: profile.settings?.scriptTemplates
             ? { ...profile.settings.scriptTemplates }
             : { ...state.settings.scriptTemplates },

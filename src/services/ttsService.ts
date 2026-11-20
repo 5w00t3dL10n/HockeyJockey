@@ -2,10 +2,18 @@ import type {
   AppSettings,
   AudioStateSnapshot,
   PiperVoiceId,
+  TtsAudioProfile,
+  TtsDspChainConfig,
   TtsEngineType,
   TtsStatusResponse,
 } from '../types/models.ts';
-import { isValidPiperVoiceId } from '../utils/domain.ts';
+import {
+  calculatePiperProsodyParams,
+  computeTtsDspChainConfig,
+  formatTextForArenaProsody,
+  isValidPiperVoiceId,
+  isValidTtsAudioProfile,
+} from '../utils/domain.ts';
 import { audioController } from './audioController.ts';
 
 export type TtsPlaybackState = 'idle' | 'loading' | 'speaking' | 'error';
@@ -39,13 +47,18 @@ export type TtsFetchFn = (
   init?: RequestInit,
 ) => Promise<TtsFetchResponse>;
 
+export interface TtsAudioPlayerOptions {
+  volume: number;
+  signal?: AbortSignal;
+  audioProfile?: TtsAudioProfile;
+  arenaReverbMix?: number;
+  preChimeEnabled?: boolean;
+}
+
 export interface TtsAudioPlayer {
   playWav(
     audioBuffer: ArrayBuffer,
-    options: {
-      volume: number;
-      signal?: AbortSignal;
-    },
+    options: TtsAudioPlayerOptions,
   ): Promise<void>;
   stop?(): void;
 }
@@ -78,14 +91,47 @@ const defaultFetch: TtsFetchFn = (input, init) => {
   return globalThis.fetch(input, init);
 };
 
+function getAudioContextConstructor(): (new () => AudioContext) | null {
+  const globalCtx = (
+    globalThis as typeof globalThis & {
+      AudioContext?: new () => AudioContext;
+      webkitAudioContext?: new () => AudioContext;
+    }
+  ).AudioContext;
+  if (typeof globalCtx === 'function') {
+    return globalCtx;
+  }
+  if (typeof window !== 'undefined') {
+    const win = window as Window & {
+      AudioContext?: new () => AudioContext;
+      webkitAudioContext?: new () => AudioContext;
+    };
+    const ctor = win.AudioContext ?? win.webkitAudioContext;
+    if (typeof ctor === 'function') {
+      return ctor;
+    }
+  }
+  return null;
+}
+
 class BrowserTtsAudioPlayer implements TtsAudioPlayer {
+  private playSeq = 0;
+  private audioContext: AudioContext | null = null;
+  private impulseCache = new Map<string, AudioBuffer>();
+  private activeWebAudioStop: (() => void) | null = null;
   private activeAudio: HTMLAudioElement | null = null;
   private activeObjectUrl: string | null = null;
   private activeAbortHandler: (() => void) | null = null;
 
   public stop(): void {
+    this.playSeq += 1;
+    const webAudioStop = this.activeWebAudioStop;
+    this.activeWebAudioStop = null;
     const abortHandler = this.activeAbortHandler;
     this.activeAbortHandler = null;
+
+    webAudioStop?.();
+
     if (this.activeAudio) {
       try {
         this.activeAudio.pause();
@@ -107,13 +153,331 @@ class BrowserTtsAudioPlayer implements TtsAudioPlayer {
     abortHandler?.();
   }
 
-  public playWav(
-    audioBuffer: ArrayBuffer,
-    options: { volume: number; signal?: AbortSignal },
-  ): Promise<void> {
-    this.stop();
+  private getOrCreateAudioContext(): AudioContext | null {
+    const AudioCtx = getAudioContextConstructor();
+    if (!AudioCtx) {
+      return null;
+    }
+    if (!this.audioContext || this.audioContext.state === 'closed') {
+      this.audioContext = new AudioCtx();
+      this.impulseCache.clear();
+    }
+    return this.audioContext;
+  }
 
-    if (options.signal?.aborted) {
+  private getOrCreateImpulseResponse(
+    ctx: AudioContext,
+    durationSec: number,
+    decay: number,
+  ): AudioBuffer {
+    const key = `${ctx.sampleRate}|${durationSec}|${decay}`;
+    const cached = this.impulseCache.get(key);
+    if (cached) {
+      return cached;
+    }
+
+    const length = Math.max(1, Math.floor(ctx.sampleRate * durationSec));
+    const impulse = ctx.createBuffer(2, length, ctx.sampleRate);
+    const preDelaySamples = Math.min(
+      length - 1,
+      Math.floor(ctx.sampleRate * 0.018),
+    );
+    const tailLength = Math.max(1, length - preDelaySamples);
+
+    for (let ch = 0; ch < 2; ch += 1) {
+      const channelData = impulse.getChannelData(ch);
+      let lpState = 0;
+      for (let i = preDelaySamples; i < length; i += 1) {
+        const progress = (i - preDelaySamples) / tailLength;
+        const envelope = Math.pow(1 - progress, decay);
+        const white = Math.random() * 2 - 1;
+        lpState = lpState * 0.55 + white * 0.45;
+        channelData[i] = lpState * envelope * 0.6;
+      }
+    }
+
+    this.impulseCache.set(key, impulse);
+    return impulse;
+  }
+
+  private buildDspChain(
+    ctx: AudioContext,
+    dspConfig: TtsDspChainConfig,
+    masterGain: GainNode,
+  ): { inputNode: AudioNode; nodes: AudioNode[] } {
+    const inputBus = ctx.createGain();
+    inputBus.gain.value = 1.0;
+
+    if (dspConfig.bypass) {
+      inputBus.connect(masterGain);
+      return { inputNode: inputBus, nodes: [inputBus] };
+    }
+
+    const nodes: AudioNode[] = [inputBus];
+
+    const highpass = ctx.createBiquadFilter();
+    highpass.type = 'highpass';
+    highpass.frequency.value = dspConfig.highpassHz;
+    highpass.Q.value = 0.707;
+    nodes.push(highpass);
+
+    const chestEq = ctx.createBiquadFilter();
+    chestEq.type = 'peaking';
+    chestEq.frequency.value = dspConfig.chestPeakHz;
+    chestEq.gain.value = dspConfig.chestGainDb;
+    chestEq.Q.value = dspConfig.chestQ;
+    nodes.push(chestEq);
+
+    const presenceEq = ctx.createBiquadFilter();
+    presenceEq.type = 'peaking';
+    presenceEq.frequency.value = dspConfig.presencePeakHz;
+    presenceEq.gain.value = dspConfig.presenceGainDb;
+    presenceEq.Q.value = dspConfig.presenceQ;
+    nodes.push(presenceEq);
+
+    const deHarsher = ctx.createBiquadFilter();
+    deHarsher.type = 'lowpass';
+    deHarsher.frequency.value = dspConfig.deHarshLowpassHz;
+    deHarsher.Q.value = dspConfig.deHarshQ;
+    nodes.push(deHarsher);
+
+    const compressor = ctx.createDynamicsCompressor();
+    compressor.threshold.value = dspConfig.compressor.thresholdDb;
+    compressor.knee.value = dspConfig.compressor.kneeDb;
+    compressor.ratio.value = dspConfig.compressor.ratio;
+    compressor.attack.value = dspConfig.compressor.attackSec;
+    compressor.release.value = dspConfig.compressor.releaseSec;
+    nodes.push(compressor);
+
+    const makeupGain = ctx.createGain();
+    makeupGain.gain.value = dspConfig.compressor.makeupGain;
+    nodes.push(makeupGain);
+
+    inputBus.connect(highpass);
+    highpass.connect(chestEq);
+    chestEq.connect(presenceEq);
+    presenceEq.connect(deHarsher);
+    deHarsher.connect(compressor);
+    compressor.connect(makeupGain);
+
+    const dryGain = ctx.createGain();
+    dryGain.gain.value = dspConfig.dryMix;
+    nodes.push(dryGain);
+    makeupGain.connect(dryGain);
+    dryGain.connect(masterGain);
+
+    if (dspConfig.wetMix > 0) {
+      const wetGain = ctx.createGain();
+      wetGain.gain.value = dspConfig.wetMix;
+      nodes.push(wetGain);
+      wetGain.connect(masterGain);
+
+      if (dspConfig.slapbackDelaySec > 0) {
+        const slapbackDelay = ctx.createDelay(1.0);
+        slapbackDelay.delayTime.value = dspConfig.slapbackDelaySec;
+        const slapbackOutGain = ctx.createGain();
+        slapbackOutGain.gain.value = 0.4;
+        nodes.push(slapbackDelay, slapbackOutGain);
+
+        makeupGain.connect(slapbackDelay);
+        slapbackDelay.connect(slapbackOutGain);
+        slapbackOutGain.connect(wetGain);
+
+        if (dspConfig.slapbackFeedback > 0) {
+          const slapbackFeedback = ctx.createGain();
+          slapbackFeedback.gain.value = dspConfig.slapbackFeedback;
+          nodes.push(slapbackFeedback);
+          slapbackDelay.connect(slapbackFeedback);
+          slapbackFeedback.connect(slapbackDelay);
+        }
+      }
+
+      if (
+        dspConfig.reverbDurationSec > 0 &&
+        typeof ctx.createConvolver === 'function'
+      ) {
+        const convolver = ctx.createConvolver();
+        convolver.buffer = this.getOrCreateImpulseResponse(
+          ctx,
+          dspConfig.reverbDurationSec,
+          dspConfig.reverbDecay,
+        );
+        nodes.push(convolver);
+        makeupGain.connect(convolver);
+        convolver.connect(wetGain);
+      }
+    }
+
+    return { inputNode: inputBus, nodes };
+  }
+
+  private schedulePreChime(
+    ctx: AudioContext,
+    targetNode: AudioNode,
+    startTimeSec: number,
+  ): {
+    sources: OscillatorNode[];
+    nodes: AudioNode[];
+    voiceStartTimeSec: number;
+  } {
+    if (typeof ctx.createOscillator !== 'function') {
+      return { sources: [], nodes: [], voiceStartTimeSec: startTimeSec };
+    }
+
+    const sources: OscillatorNode[] = [];
+    const nodes: AudioNode[] = [];
+
+    const notes = [
+      { freqHz: 587.33, offsetSec: 0, peakGain: 0.18, durationSec: 0.14 }, // D5
+      { freqHz: 880.0, offsetSec: 0.115, peakGain: 0.22, durationSec: 0.16 }, // A5
+    ];
+
+    for (const note of notes) {
+      const t0 = startTimeSec + note.offsetSec;
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(note.freqHz, t0);
+
+      const env = ctx.createGain();
+      env.gain.setValueAtTime(0.0001, t0);
+      env.gain.linearRampToValueAtTime(note.peakGain, t0 + 0.012);
+      env.gain.exponentialRampToValueAtTime(0.0001, t0 + note.durationSec);
+
+      osc.connect(env);
+      env.connect(targetNode);
+      osc.start(t0);
+      osc.stop(t0 + note.durationSec + 0.01);
+
+      sources.push(osc);
+      nodes.push(osc, env);
+    }
+
+    return {
+      sources,
+      nodes,
+      voiceStartTimeSec: startTimeSec + 0.26,
+    };
+  }
+
+  private async playWithWebAudio(
+    audioBuffer: ArrayBuffer,
+    options: TtsAudioPlayerOptions,
+    mySeq: number,
+  ): Promise<'played' | 'aborted'> {
+    const ctx = this.getOrCreateAudioContext();
+    if (!ctx) {
+      throw new Error('AudioContext saknas.');
+    }
+
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+
+    if (mySeq !== this.playSeq || options.signal?.aborted) {
+      return 'aborted';
+    }
+
+    const bufferCopy = audioBuffer.slice(0);
+    const decodedBuffer = await ctx.decodeAudioData(bufferCopy);
+
+    if (mySeq !== this.playSeq || options.signal?.aborted) {
+      return 'aborted';
+    }
+
+    const dspConfig = computeTtsDspChainConfig(
+      options.audioProfile ?? 'arena_pa',
+      options.arenaReverbMix ?? 0.28,
+    );
+
+    const masterGain = ctx.createGain();
+    masterGain.gain.value = Math.min(1, Math.max(0, options.volume));
+    masterGain.connect(ctx.destination);
+
+    const chain = this.buildDspChain(ctx, dspConfig, masterGain);
+    const baseTimeSec = ctx.currentTime + 0.01;
+    const chime = options.preChimeEnabled
+      ? this.schedulePreChime(ctx, chain.inputNode, baseTimeSec)
+      : { sources: [], nodes: [], voiceStartTimeSec: baseTimeSec };
+
+    const voiceSource = ctx.createBufferSource();
+    voiceSource.buffer = decodedBuffer;
+    voiceSource.connect(chain.inputNode);
+
+    const allNodes: AudioNode[] = [
+      voiceSource,
+      masterGain,
+      ...chain.nodes,
+      ...chime.nodes,
+    ];
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+
+      const teardown = () => {
+        voiceSource.onended = null;
+        options.signal?.removeEventListener('abort', onAbort);
+        if (this.activeWebAudioStop === onStop) {
+          this.activeWebAudioStop = null;
+        }
+        if (this.activeAbortHandler === onAbort) {
+          this.activeAbortHandler = null;
+        }
+
+        try {
+          voiceSource.stop();
+        } catch {
+          // Ignore if source has not started or already stopped
+        }
+        for (const osc of chime.sources) {
+          try {
+            osc.stop();
+          } catch {
+            // Ignore oscillator stop errors
+          }
+        }
+        for (const node of allNodes) {
+          try {
+            node.disconnect();
+          } catch {
+            // Ignore disconnect errors
+          }
+        }
+      };
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        teardown();
+        resolve();
+      };
+
+      const onStop = () => {
+        finish();
+      };
+
+      const onAbort = () => {
+        finish();
+      };
+
+      this.activeWebAudioStop = onStop;
+      this.activeAbortHandler = onAbort;
+      voiceSource.onended = finish;
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+
+      voiceSource.start(chime.voiceStartTimeSec);
+    });
+
+    return mySeq === this.playSeq && !options.signal?.aborted
+      ? 'played'
+      : 'aborted';
+  }
+
+  private playWithHtmlAudio(
+    audioBuffer: ArrayBuffer,
+    options: TtsAudioPlayerOptions,
+    mySeq: number,
+  ): Promise<void> {
+    if (mySeq !== this.playSeq || options.signal?.aborted) {
       return Promise.resolve();
     }
 
@@ -207,6 +571,37 @@ class BrowserTtsAudioPlayer implements TtsAudioPlayer {
         }
       });
     });
+  }
+
+  public async playWav(
+    audioBuffer: ArrayBuffer,
+    options: TtsAudioPlayerOptions,
+  ): Promise<void> {
+    this.stop();
+    const mySeq = this.playSeq;
+
+    if (options.signal?.aborted) {
+      return;
+    }
+
+    if (getAudioContextConstructor()) {
+      try {
+        const outcome = await this.playWithWebAudio(audioBuffer, options, mySeq);
+        if (outcome === 'played' || outcome === 'aborted') {
+          return;
+        }
+      } catch {
+        if (mySeq !== this.playSeq || options.signal?.aborted) {
+          return;
+        }
+      }
+    }
+
+    if (mySeq !== this.playSeq || options.signal?.aborted) {
+      return;
+    }
+
+    return this.playWithHtmlAudio(audioBuffer, options, mySeq);
   }
 }
 
@@ -494,6 +889,28 @@ export class TtsService {
       Number.isFinite(settings.duckVolume)
         ? Math.min(1.0, Math.max(0.0, settings.duckVolume))
         : 0.2;
+    const dramaticPauses =
+      typeof settings.ttsDramaticPauses === 'boolean'
+        ? settings.ttsDramaticPauses
+        : true;
+    const spokenText =
+      formatTextForArenaProsody(trimmed, dramaticPauses) || trimmed;
+    const prosody = calculatePiperProsodyParams({
+      rate,
+      sentenceSilenceSec: settings.ttsSentenceSilenceSec,
+      expressiveness: settings.ttsExpressiveness,
+    });
+    const audioProfile: TtsAudioProfile = isValidTtsAudioProfile(
+      settings.ttsAudioProfile,
+    )
+      ? settings.ttsAudioProfile
+      : 'arena_pa';
+    const arenaReverbMix =
+      typeof settings.ttsArenaReverbMix === 'number' &&
+      Number.isFinite(settings.ttsArenaReverbMix)
+        ? Math.min(0.8, Math.max(0.0, settings.ttsArenaReverbMix))
+        : 0.28;
+    const preChimeEnabled = Boolean(settings.ttsPreChimeEnabled);
 
     this.updateState({
       playbackState: 'loading',
@@ -517,9 +934,12 @@ export class TtsService {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            text: trimmed,
+            text: spokenText,
             voiceId,
             rate,
+            sentenceSilence: prosody.sentenceSilence,
+            noiseScale: prosody.noiseScale,
+            noiseW: prosody.noiseW,
           }),
           signal: abortController.signal,
         });
@@ -552,6 +972,9 @@ export class TtsService {
         await this.audioPlayer.playWav(wavBuffer, {
           volume,
           signal: abortController.signal,
+          audioProfile,
+          arenaReverbMix,
+          preChimeEnabled,
         });
 
         if (mySeq !== this.speakSeq || abortController.signal.aborted) {
@@ -592,7 +1015,7 @@ export class TtsService {
 
         try {
           await this.speechSynthesizer.speak({
-            text: trimmed,
+            text: spokenText,
             lang: 'sv-SE',
             rate,
             volume,
@@ -643,7 +1066,7 @@ export class TtsService {
 
       try {
         await this.speechSynthesizer.speak({
-          text: trimmed,
+          text: spokenText,
           lang: 'sv-SE',
           rate,
           volume,

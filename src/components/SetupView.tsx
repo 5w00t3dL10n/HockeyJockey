@@ -53,6 +53,7 @@ import type {
   SoundPad,
   Team,
   TrackCue,
+  TtsAudioProfile,
 } from '../types/models.ts';
 import {
   extractSpotifyTrackId,
@@ -2741,6 +2742,35 @@ const PIPER_VOICE_OPTIONS: ReadonlyArray<{
     label: 'Lisa – Svensk Speakerröst (Kvinna)',
     description: 'Klar och varm svensk speakerröst för bås och teleprompter.',
   },
+  {
+    id: 'sv_SE-alma-medium',
+    label: 'Alma – Svensk Speakerröst (Kvinna/Mjuk)',
+    description: 'Mjuk, tydlig och varm svensk speakerröst med naturlig prosodi.',
+  },
+];
+
+const TTS_AUDIO_PROFILE_OPTIONS: ReadonlyArray<{
+  id: TtsAudioProfile;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: 'arena_pa',
+    label: 'Ishall PA',
+    description:
+      'Värme, närvaroboost, kompressor samt PA-slapback och ishallsklang.',
+  },
+  {
+    id: 'booth',
+    label: 'Radiospeaker / Båset',
+    description:
+      'Tydlig broadcast-kompression och närvarolyft utan rumsklang.',
+  },
+  {
+    id: 'studio',
+    label: 'Ren / Studio',
+    description: 'Oprocessat direktljud från röstmodellen utan DSP-effekter.',
+  },
 ];
 
 function TtsSettingsSection() {
@@ -2949,6 +2979,36 @@ function TtsSettingsSection() {
               })}
             </div>
           </div>
+
+          <div className="space-y-2">
+            <div className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              Ljudkaraktär / Arena-PA Preset
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {TTS_AUDIO_PROFILE_OPTIONS.map((profile) => {
+                const isSelected = settings.ttsAudioProfile === profile.id;
+                return (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    onClick={() =>
+                      updateSettings({ ttsAudioProfile: profile.id })
+                    }
+                    className={`rounded-xl border px-3 py-2.5 text-left transition-colors cursor-pointer ${
+                      isSelected
+                        ? 'border-cyan-400/70 bg-cyan-950/60 text-cyan-100'
+                        : 'border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-800/80'
+                    }`}
+                  >
+                    <div className="text-xs font-extrabold">{profile.label}</div>
+                    <div className="mt-0.5 text-[11px] text-slate-400">
+                      {profile.description}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
 
         {/* Sliders, Automation Switches & Preview */}
@@ -3003,6 +3063,97 @@ function TtsSettingsSection() {
                 <span>0%</span>
                 <span>50%</span>
                 <span>100%</span>
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="tts-sentence-silence-range"
+                className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1"
+              >
+                Konstpauser mellan fraser ({settings.ttsSentenceSilenceSec.toFixed(2)}s)
+              </label>
+              <input
+                id="tts-sentence-silence-range"
+                type="range"
+                min={0.1}
+                max={1.5}
+                step={0.05}
+                value={settings.ttsSentenceSilenceSec}
+                onChange={(e) =>
+                  updateSettings({
+                    ttsSentenceSilenceSec: Number(e.target.value),
+                  })
+                }
+                className="w-full accent-cyan-400 cursor-pointer"
+              />
+              <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
+                <span>0.1s</span>
+                <span>0.65s</span>
+                <span>1.5s</span>
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="tts-expressiveness-range"
+                className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1"
+              >
+                Röstenergi &amp; Betoning ({settings.ttsExpressiveness.toFixed(2)})
+              </label>
+              <input
+                id="tts-expressiveness-range"
+                type="range"
+                min={0.3}
+                max={1.2}
+                step={0.05}
+                value={settings.ttsExpressiveness}
+                onChange={(e) =>
+                  updateSettings({
+                    ttsExpressiveness: Number(e.target.value),
+                  })
+                }
+                className="w-full accent-cyan-400 cursor-pointer"
+              />
+              <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
+                <span>0.30</span>
+                <span>0.75</span>
+                <span>1.20</span>
+              </div>
+            </div>
+
+            <div className="sm:col-span-2">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label
+                  htmlFor="tts-arena-reverb-range"
+                  className="block text-xs font-bold uppercase tracking-wider text-slate-400"
+                >
+                  Arena-klang / PA-eko ({Math.round(settings.ttsArenaReverbMix * 100)}%)
+                </label>
+                {settings.ttsAudioProfile !== 'arena_pa' && (
+                  <span className="text-[11px] text-slate-500">
+                    Aktivt vid Ishall PA
+                  </span>
+                )}
+              </div>
+              <input
+                id="tts-arena-reverb-range"
+                type="range"
+                min={0}
+                max={80}
+                step={5}
+                value={Math.round(settings.ttsArenaReverbMix * 100)}
+                onChange={(e) =>
+                  updateSettings({
+                    ttsArenaReverbMix: Number(e.target.value) / 100,
+                  })
+                }
+                className="w-full accent-cyan-400 cursor-pointer"
+              />
+              <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
+                <span>0%</span>
+                <span>28% (Standard)</span>
+                <span>80%</span>
               </div>
             </div>
           </div>
@@ -3068,6 +3219,77 @@ function TtsSettingsSection() {
                 <span
                   className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
                     settings.ttsRestoreMusicAfter
+                      ? 'translate-x-6'
+                      : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-white">
+                  Svensk Arena-dramaturgi
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Expanderar #12/nr till &ldquo;nummer 12&rdquo;, &ldquo;min&rdquo;
+                  till &ldquo;minuter&rdquo; och lägger konstpauser före namn,
+                  assist och utvisningsorsak.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.ttsDramaticPauses}
+                aria-label="Svensk Arena-dramaturgi"
+                onClick={() =>
+                  updateSettings({
+                    ttsDramaticPauses: !settings.ttsDramaticPauses,
+                  })
+                }
+                className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                  settings.ttsDramaticPauses
+                    ? 'border-emerald-400/50 bg-emerald-600'
+                    : 'border-slate-600 bg-slate-700'
+                }`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                    settings.ttsDramaticPauses ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-white">
+                  Spela kort PA-gong före utrop
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Spelar en mjuk 2-tons signal (D5 → A5) i högtalarna innan
+                  AI-speakern läser upp manuset.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.ttsPreChimeEnabled}
+                aria-label="Spela kort PA-gong före utrop"
+                onClick={() =>
+                  updateSettings({
+                    ttsPreChimeEnabled: !settings.ttsPreChimeEnabled,
+                  })
+                }
+                className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                  settings.ttsPreChimeEnabled
+                    ? 'border-emerald-400/50 bg-emerald-600'
+                    : 'border-slate-600 bg-slate-700'
+                }`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                    settings.ttsPreChimeEnabled
                       ? 'translate-x-6'
                       : 'translate-x-1'
                   }`}

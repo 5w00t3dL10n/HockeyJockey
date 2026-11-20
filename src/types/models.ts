@@ -76,7 +76,40 @@ export interface PenaltyDefinition {
 
 export type TtsEngineType = 'piper' | 'webspeech';
 
-export type PiperVoiceId = 'sv_SE-nst-medium' | 'sv_SE-lisa-medium';
+export type PiperVoiceId =
+  | 'sv_SE-nst-medium'
+  | 'sv_SE-lisa-medium'
+  | 'sv_SE-alma-medium';
+
+export type TtsAudioProfile = 'studio' | 'booth' | 'arena_pa';
+
+export interface TtsDspChainConfig {
+  profile: TtsAudioProfile;
+  bypass: boolean;
+  highpassHz: number;
+  chestPeakHz: number;
+  chestGainDb: number;
+  chestQ: number;
+  presencePeakHz: number;
+  presenceGainDb: number;
+  presenceQ: number;
+  deHarshLowpassHz: number;
+  deHarshQ: number;
+  compressor: {
+    thresholdDb: number;
+    kneeDb: number;
+    ratio: number;
+    attackSec: number;
+    releaseSec: number;
+    makeupGain: number;
+  };
+  slapbackDelaySec: number;
+  slapbackFeedback: number;
+  reverbDurationSec: number;
+  reverbDecay: number;
+  wetMix: number;
+  dryMix: number;
+}
 
 export interface TtsVoiceStatus {
   id: PiperVoiceId;
@@ -103,6 +136,12 @@ export interface AppSettings {
   ttsVolume: number; // 0.0–1.0 (default 1.0)
   ttsAutoRead: boolean;
   ttsRestoreMusicAfter: boolean;
+  ttsAudioProfile: TtsAudioProfile;
+  ttsDramaticPauses: boolean;
+  ttsSentenceSilenceSec: number; // 0.1–1.5 (default 0.65)
+  ttsExpressiveness: number; // 0.3–1.2 (default 0.75)
+  ttsArenaReverbMix: number; // 0.0–0.8 (default 0.28)
+  ttsPreChimeEnabled: boolean;
   spotifyClientId: string;
   spotifyRedirectUri: string;
   keyBindings: KeyBindings;
@@ -149,6 +188,12 @@ export interface MatchProfile {
       | 'ttsVolume'
       | 'ttsAutoRead'
       | 'ttsRestoreMusicAfter'
+      | 'ttsAudioProfile'
+      | 'ttsDramaticPauses'
+      | 'ttsSentenceSilenceSec'
+      | 'ttsExpressiveness'
+      | 'ttsArenaReverbMix'
+      | 'ttsPreChimeEnabled'
       | 'scriptTemplates'
       | 'keyBindings'
       | 'soundboardGroups'

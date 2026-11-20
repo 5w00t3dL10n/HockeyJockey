@@ -14,7 +14,7 @@ import type {
 } from './src/types/models.ts';
 import {
   buildEmbeddedMediaUri,
-  calculatePiperLengthScale,
+  calculatePiperProsodyParams,
   inferAudioMimeType,
   isAcceptedAudioFileName,
   isValidPiperVoiceId,
@@ -540,6 +540,12 @@ const PIPER_VOICE_CATALOG: ReadonlyArray<PiperVoiceCatalogEntry> = [
     onnxFilename: 'sv_SE-lisa-medium.onnx',
     configFilename: 'sv_SE-lisa-medium.onnx.json',
   },
+  {
+    id: 'sv_SE-alma-medium',
+    label: 'Alma – Svensk Speakerröst (Kvinna/Mjuk)',
+    onnxFilename: 'sv_SE-alma-medium.onnx',
+    configFilename: 'sv_SE-alma-medium.onnx.json',
+  },
 ];
 
 const PIPER_VOICE_MAP = new Map<PiperVoiceId, PiperVoiceCatalogEntry>(
@@ -686,12 +692,25 @@ function readJsonBody(
   });
 }
 
+function toOptionalNumericInput(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    return Number(value);
+  }
+  return undefined;
+}
+
 function synthesizeWithPiper(params: {
   binPath: string;
   libDir: string;
   onnxPath: string;
   configPath: string;
   lengthScale: number;
+  noiseScale: number;
+  noiseW: number;
+  sentenceSilence: number;
   text: string;
 }): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -707,6 +726,12 @@ function synthesizeWithPiper(params: {
       params.configPath,
       '--length_scale',
       String(params.lengthScale),
+      '--noise_scale',
+      String(params.noiseScale),
+      '--noise_w',
+      String(params.noiseW),
+      '--sentence_silence',
+      String(params.sentenceSilence),
       '--output_file',
       '-',
       '-q',
@@ -848,11 +873,19 @@ export function createPiperTtsMiddleware(): Connect.NextHandleFunction {
         let rawText: unknown;
         let rawVoiceId: unknown;
         let rawRate: unknown;
+        let rawSentenceSilence: unknown;
+        let rawNoiseScale: unknown;
+        let rawNoiseW: unknown;
+        let rawExpressiveness: unknown;
 
         if (req.method === 'GET') {
           rawText = parsedUrl.searchParams.get('text') ?? '';
           rawVoiceId = parsedUrl.searchParams.get('voiceId');
           rawRate = parsedUrl.searchParams.get('rate');
+          rawSentenceSilence = parsedUrl.searchParams.get('sentenceSilence');
+          rawNoiseScale = parsedUrl.searchParams.get('noiseScale');
+          rawNoiseW = parsedUrl.searchParams.get('noiseW');
+          rawExpressiveness = parsedUrl.searchParams.get('expressiveness');
         } else {
           const bodyRes = await readJsonBody(req);
           if (!bodyRes.ok) {
@@ -862,6 +895,10 @@ export function createPiperTtsMiddleware(): Connect.NextHandleFunction {
           rawText = bodyRes.data.text;
           rawVoiceId = bodyRes.data.voiceId;
           rawRate = bodyRes.data.rate;
+          rawSentenceSilence = bodyRes.data.sentenceSilence;
+          rawNoiseScale = bodyRes.data.noiseScale;
+          rawNoiseW = bodyRes.data.noiseW;
+          rawExpressiveness = bodyRes.data.expressiveness;
         }
 
         const trimmedText =
@@ -889,13 +926,32 @@ export function createPiperTtsMiddleware(): Connect.NextHandleFunction {
           voiceId = rawVoiceId.trim() as PiperVoiceId;
         }
 
-        const parsedRate =
-          typeof rawRate === 'number'
-            ? rawRate
-            : typeof rawRate === 'string' && rawRate.trim() !== ''
-              ? Number(rawRate)
-              : 1.0;
-        const lengthScale = calculatePiperLengthScale(parsedRate);
+        const parsedRate = toOptionalNumericInput(rawRate) ?? 1.0;
+        const parsedSentenceSilence = toOptionalNumericInput(rawSentenceSilence);
+        const parsedNoiseScale = toOptionalNumericInput(rawNoiseScale);
+        const parsedExpressiveness = toOptionalNumericInput(rawExpressiveness);
+        const parsedNoiseW = toOptionalNumericInput(rawNoiseW);
+
+        const baseProsody = calculatePiperProsodyParams({
+          rate: parsedRate,
+          sentenceSilenceSec: parsedSentenceSilence,
+          expressiveness: parsedNoiseScale ?? parsedExpressiveness,
+        });
+        const noiseW =
+          parsedNoiseW !== undefined && !Number.isNaN(parsedNoiseW)
+            ? Number(
+                (
+                  !Number.isFinite(parsedNoiseW)
+                    ? parsedNoiseW > 0
+                      ? 1.1
+                      : 0.5
+                    : Math.min(1.1, Math.max(0.5, parsedNoiseW))
+                ).toFixed(3),
+              )
+            : baseProsody.noiseW;
+        const lengthScale = baseProsody.lengthScale;
+        const sentenceSilence = baseProsody.sentenceSilence;
+        const noiseScale = baseProsody.noiseScale;
 
         const piperRoot = getPiperRootDir();
         const voiceEntry = PIPER_VOICE_MAP.get(voiceId);
@@ -923,7 +979,7 @@ export function createPiperTtsMiddleware(): Connect.NextHandleFunction {
           return;
         }
 
-        const cacheKey = `${piperRoot}|${voiceId}|${lengthScale}|${trimmedText}`;
+        const cacheKey = `${piperRoot}|${voiceId}|${lengthScale}|${sentenceSilence}|${noiseScale}|${noiseW}|${trimmedText}`;
         let wavBuffer = getCachedWav(cacheKey);
 
         if (!wavBuffer) {
@@ -934,6 +990,9 @@ export function createPiperTtsMiddleware(): Connect.NextHandleFunction {
               onnxPath,
               configPath,
               lengthScale,
+              noiseScale,
+              noiseW,
+              sentenceSilence,
               text: trimmedText,
             });
             setCachedWav(cacheKey, wavBuffer);

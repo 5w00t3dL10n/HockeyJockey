@@ -31,6 +31,8 @@ import type {
 } from '../types/models.ts';
 import {
   generatePenaltyScript,
+  getPiperVoiceShortLabel,
+  getTtsAudioProfileLabel,
   lookupPlayerName,
   normalizeJerseyNumber,
 } from '../utils/domain.ts';
@@ -268,14 +270,12 @@ export const PenaltyFlowModal = forwardRef<
     if (settings.ttsEngine === 'webspeech') {
       return 'Web Speech (sv-SE)';
     }
-    const voiceLabel =
-      settings.ttsVoiceId === 'sv_SE-lisa-medium'
-        ? 'Lisa (Kvinna)'
-        : 'NST (Man/Neutral)';
+    const voiceLabel = getPiperVoiceShortLabel(settings.ttsVoiceId);
+    const profileLabel = getTtsAudioProfileLabel(settings.ttsAudioProfile);
     if (ttsState.piperStatus && !ttsState.piperStatus.available) {
-      return `Piper ej tillgänglig – Web Speech fallback (${voiceLabel})`;
+      return `Piper ej tillgänglig – Web Speech fallback (${voiceLabel} • ${profileLabel})`;
     }
-    return `Piper AI: ${voiceLabel}`;
+    return `Piper Offline (${voiceLabel} • ${profileLabel})`;
   })();
 
   return (

@@ -2547,6 +2547,7 @@ import {
 const voiceChecks = {
   nst: isValidPiperVoiceId('sv_SE-nst-medium'),
   lisa: isValidPiperVoiceId('sv_SE-lisa-medium'),
+  alma: isValidPiperVoiceId('sv_SE-alma-medium'),
   traversalUnix: isValidPiperVoiceId('../etc/passwd'),
   traversalWin: isValidPiperVoiceId('..\\\\..\\\\windows\\\\system32'),
   traversalNested: isValidPiperVoiceId('sv_SE-nst-medium/../sv_SE-lisa-medium'),
@@ -2600,11 +2601,15 @@ console.log(JSON.stringify({
 """
         res = run_ts_script(script)
 
-        self.assertEqual(res["PIPER_VOICE_IDS"], ["sv_SE-nst-medium", "sv_SE-lisa-medium"])
+        self.assertEqual(
+            res["PIPER_VOICE_IDS"],
+            ["sv_SE-nst-medium", "sv_SE-lisa-medium", "sv_SE-alma-medium"],
+        )
 
         vc = res["voiceChecks"]
         self.assertIs(vc["nst"], True)
         self.assertIs(vc["lisa"], True)
+        self.assertIs(vc["alma"], True)
         for invalid_key in (
             "traversalUnix",
             "traversalWin",
@@ -3067,6 +3072,741 @@ console.log(JSON.stringify({
             {
                 "ttsRate": 1.0,
                 "ttsVolume": 1.0,
+            },
+        )
+
+    def test_26_piper_alma_and_tts_audio_profiles(self) -> None:
+        """Verify PIPER_VOICE_IDS includes sv_SE-alma-medium (3 Swedish voices), isValidTtsAudioProfile, and labels."""
+        script = """
+import {
+  PIPER_VOICE_IDS,
+  TTS_AUDIO_PROFILES,
+  getPiperVoiceShortLabel,
+  getTtsAudioProfileLabel,
+  isValidPiperVoiceId,
+  isValidTtsAudioProfile,
+} from './src/utils/domain.ts';
+
+console.log(JSON.stringify({
+  voices: [...PIPER_VOICE_IDS],
+  almaValid: isValidPiperVoiceId('sv_SE-alma-medium'),
+  profiles: [...TTS_AUDIO_PROFILES],
+  profileChecks: {
+    studio: isValidTtsAudioProfile('studio'),
+    booth: isValidTtsAudioProfile('booth'),
+    arena_pa: isValidTtsAudioProfile('arena_pa'),
+    arena: isValidTtsAudioProfile('arena'),
+    upper: isValidTtsAudioProfile('STUDIO'),
+    padded: isValidTtsAudioProfile(' arena_pa '),
+    empty: isValidTtsAudioProfile(''),
+    nullVal: isValidTtsAudioProfile(null),
+    undefinedVal: isValidTtsAudioProfile(undefined),
+    numVal: isValidTtsAudioProfile(42),
+    objVal: isValidTtsAudioProfile({}),
+  },
+  voiceShortLabels: {
+    nst: getPiperVoiceShortLabel('sv_SE-nst-medium'),
+    lisa: getPiperVoiceShortLabel('sv_SE-lisa-medium'),
+    alma: getPiperVoiceShortLabel('sv_SE-alma-medium'),
+  },
+  profileLabels: {
+    studio: getTtsAudioProfileLabel('studio'),
+    booth: getTtsAudioProfileLabel('booth'),
+    arena_pa: getTtsAudioProfileLabel('arena_pa'),
+  },
+}));
+"""
+        res = run_ts_script(script)
+
+        self.assertEqual(len(res["voices"]), 3)
+        self.assertIn("sv_SE-alma-medium", res["voices"])
+        self.assertEqual(
+            res["voices"],
+            ["sv_SE-nst-medium", "sv_SE-lisa-medium", "sv_SE-alma-medium"],
+        )
+        self.assertIs(res["almaValid"], True)
+
+        self.assertEqual(res["profiles"], ["studio", "booth", "arena_pa"])
+        pc = res["profileChecks"]
+        self.assertIs(pc["studio"], True)
+        self.assertIs(pc["booth"], True)
+        self.assertIs(pc["arena_pa"], True)
+        for bad_key in ("arena", "upper", "padded", "empty", "nullVal", "undefinedVal", "numVal", "objVal"):
+            self.assertIs(pc[bad_key], False, f"Expected {bad_key} to be rejected by isValidTtsAudioProfile")
+
+        self.assertEqual(res["voiceShortLabels"], {"nst": "NST", "lisa": "Lisa", "alma": "Alma"})
+        self.assertEqual(
+            res["profileLabels"],
+            {
+                "studio": "Ren / Studio",
+                "booth": "Radiospeaker / Båset",
+                "arena_pa": "Ishall PA",
+            },
+        )
+
+    def test_27_calculate_piper_prosody_params(self) -> None:
+        """Verify calculatePiperProsodyParams defaults, custom values, clamping, noiseW range, and zero/NaN safety."""
+        script = """
+import { calculatePiperProsodyParams } from './src/utils/domain.ts';
+
+console.log(JSON.stringify({
+  noArg: calculatePiperProsodyParams(),
+  emptyObj: calculatePiperProsodyParams({}),
+  customValid: calculatePiperProsodyParams({
+    rate: 1.25,
+    sentenceSilenceSec: 0.9,
+    expressiveness: 1.05,
+  }),
+  clampLow: calculatePiperProsodyParams({
+    rate: 0.1,
+    sentenceSilenceSec: 0.01,
+    expressiveness: 0.05,
+  }),
+  clampHigh: calculatePiperProsodyParams({
+    rate: 5.0,
+    sentenceSilenceSec: 4.0,
+    expressiveness: 2.5,
+  }),
+  boundsExactMin: calculatePiperProsodyParams({
+    rate: 0.5,
+    sentenceSilenceSec: 0.1,
+    expressiveness: 0.3,
+  }),
+  boundsExactMax: calculatePiperProsodyParams({
+    rate: 2.0,
+    sentenceSilenceSec: 1.5,
+    expressiveness: 1.2,
+  }),
+  zeros: calculatePiperProsodyParams({
+    rate: 0,
+    sentenceSilenceSec: 0,
+    expressiveness: 0,
+  }),
+  negatives: calculatePiperProsodyParams({
+    rate: -1,
+    sentenceSilenceSec: -2,
+    expressiveness: -1,
+  }),
+  nans: calculatePiperProsodyParams({
+    rate: Number.NaN,
+    sentenceSilenceSec: Number.NaN,
+    expressiveness: Number.NaN,
+  }),
+  posInf: calculatePiperProsodyParams({
+    rate: Number.POSITIVE_INFINITY,
+    sentenceSilenceSec: Number.POSITIVE_INFINITY,
+    expressiveness: Number.POSITIVE_INFINITY,
+  }),
+  negInf: calculatePiperProsodyParams({
+    rate: Number.NEGATIVE_INFINITY,
+    sentenceSilenceSec: Number.NEGATIVE_INFINITY,
+    expressiveness: Number.NEGATIVE_INFINITY,
+  }),
+  invalidStrings: calculatePiperProsodyParams({
+    rate: 'fast',
+    sentenceSilenceSec: 'abc',
+    expressiveness: '',
+  }),
+}));
+"""
+        res = run_ts_script(script)
+
+        expected_default = {
+            "lengthScale": 1.0,
+            "sentenceSilence": 0.65,
+            "noiseScale": 0.75,
+            "noiseW": 0.833,
+        }
+        self.assertEqual(res["noArg"], expected_default)
+        self.assertEqual(res["emptyObj"], expected_default)
+        self.assertEqual(
+            res["customValid"],
+            {
+                "lengthScale": 0.8,
+                "sentenceSilence": 0.9,
+                "noiseScale": 1.05,
+                "noiseW": 0.953,
+            },
+        )
+        self.assertEqual(
+            res["clampLow"],
+            {
+                "lengthScale": 2.0,
+                "sentenceSilence": 0.1,
+                "noiseScale": 0.3,
+                "noiseW": 0.653,
+            },
+        )
+        self.assertEqual(
+            res["clampHigh"],
+            {
+                "lengthScale": 0.5,
+                "sentenceSilence": 1.5,
+                "noiseScale": 1.2,
+                "noiseW": 1.013,
+            },
+        )
+        self.assertEqual(
+            res["boundsExactMin"],
+            {
+                "lengthScale": 2.0,
+                "sentenceSilence": 0.1,
+                "noiseScale": 0.3,
+                "noiseW": 0.653,
+            },
+        )
+        self.assertEqual(
+            res["boundsExactMax"],
+            {
+                "lengthScale": 0.5,
+                "sentenceSilence": 1.5,
+                "noiseScale": 1.2,
+                "noiseW": 1.013,
+            },
+        )
+        self.assertEqual(
+            res["zeros"],
+            {
+                "lengthScale": 1.0,
+                "sentenceSilence": 0.1,
+                "noiseScale": 0.3,
+                "noiseW": 0.653,
+            },
+        )
+        self.assertEqual(
+            res["negatives"],
+            {
+                "lengthScale": 1.0,
+                "sentenceSilence": 0.1,
+                "noiseScale": 0.3,
+                "noiseW": 0.653,
+            },
+        )
+        self.assertEqual(res["nans"], expected_default)
+        self.assertEqual(
+            res["posInf"],
+            {
+                "lengthScale": 1.0,
+                "sentenceSilence": 1.5,
+                "noiseScale": 1.2,
+                "noiseW": 1.013,
+            },
+        )
+        self.assertEqual(
+            res["negInf"],
+            {
+                "lengthScale": 1.0,
+                "sentenceSilence": 0.1,
+                "noiseScale": 0.3,
+                "noiseW": 0.653,
+            },
+        )
+        self.assertEqual(res["invalidStrings"], expected_default)
+
+        for key, params in res.items():
+            self.assertGreaterEqual(params["sentenceSilence"], 0.1, key)
+            self.assertLessEqual(params["sentenceSilence"], 1.5, key)
+            self.assertGreaterEqual(params["noiseScale"], 0.3, key)
+            self.assertLessEqual(params["noiseScale"], 1.2, key)
+            self.assertGreaterEqual(params["noiseW"], 0.5, key)
+            self.assertLessEqual(params["noiseW"], 1.1, key)
+
+    def test_28_format_text_for_arena_prosody(self) -> None:
+        """Verify formatTextForArenaProsody with dramaticPauses on/off, #/nr/min expansion, pauses, and empty strings."""
+        script = """
+import { formatTextForArenaProsody } from './src/utils/domain.ts';
+
+const goalInput = 'Mål för Sundsvall Hockey! Målskytt #12, Emil Lindblom, Framspelad av nr 14 Erik Svensson.';
+const penaltyInput = 'Sundsvall Hockey drar på sig en utvisning genom #22, Rasmus Karlsson, 2 min för hakning.';
+const nrDotMinDotInput = 'nr. 6 får 5 min. för slashing';
+const leadingGoalPhrase = 'Målskytt #12, Emil Lindblom';
+
+console.log(JSON.stringify({
+  empty: formatTextForArenaProsody(''),
+  whitespace: formatTextForArenaProsody('   \\n\\t  '),
+  nonString: formatTextForArenaProsody(null),
+  goalDramaticOn: formatTextForArenaProsody(goalInput, true),
+  goalDramaticDefault: formatTextForArenaProsody(goalInput),
+  goalDramaticOff: formatTextForArenaProsody(goalInput, false),
+  penaltyDramaticOn: formatTextForArenaProsody(penaltyInput, true),
+  penaltyDramaticOff: formatTextForArenaProsody(penaltyInput, false),
+  nrDotMinDotOn: formatTextForArenaProsody(nrDotMinDotInput, true),
+  nrDotMinDotOff: formatTextForArenaProsody(nrDotMinDotInput, false),
+  leadingPhraseOn: formatTextForArenaProsody(leadingGoalPhrase, true),
+}));
+"""
+        res = run_ts_script(script)
+
+        self.assertEqual(res["empty"], "")
+        self.assertEqual(res["whitespace"], "")
+        self.assertEqual(res["nonString"], "")
+
+        expected_goal_on = (
+            "Mål för Sundsvall Hockey! Målskytt, nummer 12. Emil Lindblom. "
+            "Framspelad av, nummer 14 Erik Svensson."
+        )
+        self.assertEqual(res["goalDramaticOn"], expected_goal_on)
+        self.assertEqual(res["goalDramaticDefault"], expected_goal_on)
+        self.assertEqual(
+            res["goalDramaticOff"],
+            "Mål för Sundsvall Hockey! Målskytt nummer 12, Emil Lindblom, Framspelad av nummer 14 Erik Svensson.",
+        )
+
+        self.assertEqual(
+            res["penaltyDramaticOn"],
+            "Sundsvall Hockey drar på sig en utvisning genom nummer 22. Rasmus Karlsson. 2 minuter för hakning.",
+        )
+        self.assertEqual(
+            res["penaltyDramaticOff"],
+            "Sundsvall Hockey drar på sig en utvisning genom nummer 22, Rasmus Karlsson, 2 minuter för hakning.",
+        )
+
+        self.assertEqual(
+            res["nrDotMinDotOn"],
+            "nummer 6 får. 5 minuter för slashing",
+        )
+        self.assertEqual(
+            res["nrDotMinDotOff"],
+            "nummer 6 får 5 minuter för slashing",
+        )
+        self.assertEqual(
+            res["leadingPhraseOn"],
+            "Målskytt, nummer 12. Emil Lindblom",
+        )
+
+    def test_29_compute_tts_dsp_chain_config(self) -> None:
+        """Verify computeTtsDspChainConfig for studio, booth, arena_pa, and arenaReverbMix clamping."""
+        script = """
+import { computeTtsDspChainConfig } from './src/utils/domain.ts';
+
+console.log(JSON.stringify({
+  studioDefault: computeTtsDspChainConfig('studio'),
+  studioWithMixArg: computeTtsDspChainConfig('studio', 0.6),
+  boothDefault: computeTtsDspChainConfig('booth'),
+  boothWithMixArg: computeTtsDspChainConfig('booth', 0.5),
+  arenaDefault: computeTtsDspChainConfig('arena_pa'),
+  arenaCustomMix: computeTtsDspChainConfig('arena_pa', 0.45),
+  arenaClampLow: computeTtsDspChainConfig('arena_pa', -0.5),
+  arenaClampZero: computeTtsDspChainConfig('arena_pa', 0.0),
+  arenaClampHigh: computeTtsDspChainConfig('arena_pa', 1.5),
+  arenaClampNaN: computeTtsDspChainConfig('arena_pa', Number.NaN),
+  arenaClampPosInf: computeTtsDspChainConfig('arena_pa', Number.POSITIVE_INFINITY),
+  arenaClampNegInf: computeTtsDspChainConfig('arena_pa', Number.NEGATIVE_INFINITY),
+  invalidProfileFallback: computeTtsDspChainConfig('unknown_profile', 0.4),
+}));
+"""
+        res = run_ts_script(script)
+
+        studio = res["studioDefault"]
+        self.assertEqual(studio["profile"], "studio")
+        self.assertIs(studio["bypass"], True)
+        self.assertEqual(studio["wetMix"], 0)
+        self.assertEqual(studio["dryMix"], 1.0)
+        self.assertEqual(studio["slapbackDelaySec"], 0)
+        self.assertEqual(studio["reverbDurationSec"], 0)
+        self.assertEqual(res["studioWithMixArg"]["wetMix"], 0)
+        self.assertIs(res["studioWithMixArg"]["bypass"], True)
+
+        booth = res["boothDefault"]
+        self.assertEqual(booth["profile"], "booth")
+        self.assertIs(booth["bypass"], False)
+        self.assertEqual(booth["wetMix"], 0)
+        self.assertEqual(booth["dryMix"], 1.0)
+        self.assertEqual(booth["deHarshLowpassHz"], 7400)
+        self.assertEqual(booth["highpassHz"], 115)
+        self.assertEqual(booth["slapbackDelaySec"], 0)
+        self.assertEqual(booth["reverbDurationSec"], 0)
+        self.assertEqual(res["boothWithMixArg"]["wetMix"], 0)
+
+        arena = res["arenaDefault"]
+        self.assertEqual(arena["profile"], "arena_pa")
+        self.assertIs(arena["bypass"], False)
+        self.assertEqual(arena["slapbackDelaySec"], 0.085)
+        self.assertEqual(arena["slapbackFeedback"], 0.18)
+        self.assertEqual(arena["reverbDurationSec"], 1.35)
+        self.assertEqual(arena["deHarshLowpassHz"], 7400)
+        self.assertEqual(arena["wetMix"], 0.28)
+        self.assertEqual(arena["dryMix"], 1.0)
+
+        self.assertEqual(res["arenaCustomMix"]["wetMix"], 0.45)
+        self.assertEqual(res["arenaClampLow"]["wetMix"], 0.0)
+        self.assertEqual(res["arenaClampZero"]["wetMix"], 0.0)
+        self.assertEqual(res["arenaClampHigh"]["wetMix"], 0.8)
+        self.assertEqual(res["arenaClampNaN"]["wetMix"], 0.28)
+        self.assertEqual(res["arenaClampPosInf"]["wetMix"], 0.8)
+        self.assertEqual(res["arenaClampNegInf"]["wetMix"], 0.0)
+
+        self.assertEqual(res["invalidProfileFallback"]["profile"], "arena_pa")
+        self.assertEqual(res["invalidProfileFallback"]["wetMix"], 0.4)
+
+    def test_30_tts_dsp_prosody_sanitize_match_config_and_profile(self) -> None:
+        """Verify backward compatibility and clamping of the 6 new tts* fields + Alma voice in sanitizeSettings, sanitizeMatchProfile, and sanitizeMatchConfig."""
+        script = """
+import {
+  DEFAULT_MATCH_PROFILES,
+  DEFAULT_SETTINGS,
+  DEFAULT_SOUND_PADS,
+  DEFAULT_TEAMS,
+} from './src/data/defaults.ts';
+import { sanitizeMatchConfig, sanitizeMatchProfile } from './src/utils/domain.ts';
+
+function pickNewTtsFields(s) {
+  if (!s) return null;
+  return {
+    ttsVoiceId: s.ttsVoiceId,
+    ttsAudioProfile: s.ttsAudioProfile,
+    ttsDramaticPauses: s.ttsDramaticPauses,
+    ttsSentenceSilenceSec: s.ttsSentenceSilenceSec,
+    ttsExpressiveness: s.ttsExpressiveness,
+    ttsArenaReverbMix: s.ttsArenaReverbMix,
+    ttsPreChimeEnabled: s.ttsPreChimeEnabled,
+  };
+}
+
+// 1. Missing settings & legacy settings without the 6 new fields
+const missingSettingsCompletely = sanitizeMatchConfig({ version: 1 });
+const legacyWithoutDspFields = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    duckVolume: 0.3,
+    ttsEnabled: true,
+    ttsVoiceId: 'sv_SE-lisa-medium',
+  },
+});
+
+// 2. Custom fallback preservation when raw settings lacks the 6 new fields
+const customFallbackSnapshot = {
+  version: 1,
+  teams: DEFAULT_TEAMS,
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    ...DEFAULT_SETTINGS,
+    ttsVoiceId: 'sv_SE-alma-medium',
+    ttsAudioProfile: 'booth',
+    ttsDramaticPauses: false,
+    ttsSentenceSilenceSec: 1.1,
+    ttsExpressiveness: 0.55,
+    ttsArenaReverbMix: 0.45,
+    ttsPreChimeEnabled: true,
+  },
+};
+const nonObjectWithCustomFallback = sanitizeMatchConfig(
+  { version: 1, settings: null },
+  customFallbackSnapshot,
+);
+const legacyWithCustomFallback = sanitizeMatchConfig(
+  { version: 1, settings: { duckVolume: 0.25 } },
+  customFallbackSnapshot,
+);
+
+// 3. Invalid & out-of-range low/high/NaN/string values in sanitizeMatchConfig (exercises sanitizeSettings)
+const invalidAndLow = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    ttsVoiceId: 'sv_SE-alma-medium',
+    ttsAudioProfile: 'stadium',
+    ttsDramaticPauses: 'yes',
+    ttsSentenceSilenceSec: 0.01,
+    ttsExpressiveness: 0.05,
+    ttsArenaReverbMix: -0.5,
+    ttsPreChimeEnabled: 'true',
+  },
+});
+
+const highAndTrimmed = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    ttsVoiceId: '  sv_SE-alma-medium ',
+    ttsAudioProfile: '  booth ',
+    ttsDramaticPauses: false,
+    ttsSentenceSilenceSec: 3.5,
+    ttsExpressiveness: 2.5,
+    ttsArenaReverbMix: 1.5,
+    ttsPreChimeEnabled: true,
+  },
+});
+
+const nanNumericStringAndZero = sanitizeMatchConfig({
+  version: 1,
+  settings: {
+    ttsAudioProfile: 'studio',
+    ttsSentenceSilenceSec: 'not-a-num',
+    ttsExpressiveness: '0.95',
+    ttsArenaReverbMix: 0,
+  },
+});
+
+// 4. Valid custom values preserved across sanitizeMatchConfig and Zustand persist envelope
+const customRaw = {
+  version: 1,
+  settings: {
+    ttsVoiceId: 'sv_SE-alma-medium',
+    ttsAudioProfile: 'studio',
+    ttsDramaticPauses: false,
+    ttsSentenceSilenceSec: 1.25,
+    ttsExpressiveness: 0.9,
+    ttsArenaReverbMix: 0.5,
+    ttsPreChimeEnabled: true,
+  },
+  matchProfiles: [
+    {
+      id: 'prof-dsp-custom',
+      name: 'Alma Studio Profil',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        ttsVoiceId: 'sv_SE-alma-medium',
+        ttsAudioProfile: 'booth',
+        ttsDramaticPauses: false,
+        ttsSentenceSilenceSec: 0.95,
+        ttsExpressiveness: 0.85,
+        ttsArenaReverbMix: 0.6,
+        ttsPreChimeEnabled: true,
+      },
+      updatedAt: '2026-11-20T00:00:00.000Z',
+    },
+    {
+      id: 'prof-dsp-legacy',
+      name: 'Äldre Profil utan DSP',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: { duckVolume: 0.25 },
+      updatedAt: '2026-11-20T00:00:00.000Z',
+    },
+    {
+      id: 'prof-dsp-invalid',
+      name: 'Profil med Ogiltig DSP',
+      soundPads: DEFAULT_SOUND_PADS,
+      settings: {
+        ttsAudioProfile: 'bad_profile',
+        ttsDramaticPauses: 1,
+        ttsSentenceSilenceSec: 0.0,
+        ttsExpressiveness: 9.0,
+        ttsArenaReverbMix: 2.0,
+        ttsPreChimeEnabled: 'no',
+      },
+      updatedAt: '2026-11-20T00:00:00.000Z',
+    },
+  ],
+};
+
+const customConfig = sanitizeMatchConfig(customRaw);
+const customEnvelope = sanitizeMatchConfig({ state: customRaw, version: 1 });
+
+// 5. Direct sanitizeMatchProfile checks
+const directLegacy = sanitizeMatchProfile({
+  id: 'direct-legacy',
+  name: 'Direkt Äldre',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: { duckVolume: 0.25 },
+});
+
+const directCustom = sanitizeMatchProfile({
+  id: 'direct-custom',
+  name: 'Direkt Custom DSP',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    ttsVoiceId: 'sv_SE-alma-medium',
+    ttsAudioProfile: '  studio ',
+    ttsDramaticPauses: false,
+    ttsSentenceSilenceSec: 0.4,
+    ttsExpressiveness: 1.1,
+    ttsArenaReverbMix: 0.15,
+    ttsPreChimeEnabled: true,
+  },
+});
+
+const directInvalidClamp = sanitizeMatchProfile({
+  id: 'direct-invalid-clamp',
+  name: 'Direkt Clamp',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    ttsAudioProfile: 'bogus',
+    ttsDramaticPauses: 'false',
+    ttsSentenceSilenceSec: 5.0,
+    ttsExpressiveness: 0.01,
+    ttsArenaReverbMix: -1.0,
+    ttsPreChimeEnabled: 0,
+  },
+});
+
+const directNaN = sanitizeMatchProfile({
+  id: 'direct-nan',
+  name: 'Direkt NaN DSP',
+  soundPads: DEFAULT_SOUND_PADS,
+  settings: {
+    ttsSentenceSilenceSec: 'abc',
+    ttsExpressiveness: 'xyz',
+    ttsArenaReverbMix: 'nope',
+  },
+});
+
+console.log(JSON.stringify({
+  defaultSettings: pickNewTtsFields(DEFAULT_SETTINGS),
+  defaultProfiles: DEFAULT_MATCH_PROFILES.map((p) => ({
+    id: p.id,
+    ...pickNewTtsFields(p.settings),
+  })),
+  missingSettingsCompletely: pickNewTtsFields(missingSettingsCompletely.settings),
+  legacyWithoutDspFields: pickNewTtsFields(legacyWithoutDspFields.settings),
+  nonObjectWithCustomFallback: pickNewTtsFields(nonObjectWithCustomFallback.settings),
+  legacyWithCustomFallback: pickNewTtsFields(legacyWithCustomFallback.settings),
+  invalidAndLow: pickNewTtsFields(invalidAndLow.settings),
+  highAndTrimmed: pickNewTtsFields(highAndTrimmed.settings),
+  nanNumericStringAndZero: pickNewTtsFields(nanNumericStringAndZero.settings),
+  customConfigSettings: pickNewTtsFields(customConfig.settings),
+  customConfigProfiles: customConfig.matchProfiles?.map((p) => ({
+    id: p.id,
+    settings: p.settings ?? null,
+  })),
+  envelopeMatchesConfig:
+    JSON.stringify(customEnvelope) === JSON.stringify(customConfig),
+  directLegacy: directLegacy?.settings ?? null,
+  directCustom: directCustom?.settings ?? null,
+  directInvalidClamp: directInvalidClamp?.settings ?? null,
+  directNaN: directNaN?.settings ?? null,
+}));
+"""
+        res = run_ts_script(script)
+
+        expected_defaults = {
+            "ttsVoiceId": "sv_SE-nst-medium",
+            "ttsAudioProfile": "arena_pa",
+            "ttsDramaticPauses": True,
+            "ttsSentenceSilenceSec": 0.65,
+            "ttsExpressiveness": 0.75,
+            "ttsArenaReverbMix": 0.28,
+            "ttsPreChimeEnabled": False,
+        }
+        self.assertEqual(res["defaultSettings"], expected_defaults)
+        self.assertGreaterEqual(len(res["defaultProfiles"]), 2)
+        for prof in res["defaultProfiles"]:
+            self.assertEqual(
+                {k: prof[k] for k in expected_defaults},
+                expected_defaults,
+            )
+
+        self.assertEqual(res["missingSettingsCompletely"], expected_defaults)
+        self.assertEqual(
+            res["legacyWithoutDspFields"],
+            {
+                **expected_defaults,
+                "ttsVoiceId": "sv_SE-lisa-medium",
+            },
+        )
+
+        expected_custom_fallback = {
+            "ttsVoiceId": "sv_SE-alma-medium",
+            "ttsAudioProfile": "booth",
+            "ttsDramaticPauses": False,
+            "ttsSentenceSilenceSec": 1.1,
+            "ttsExpressiveness": 0.55,
+            "ttsArenaReverbMix": 0.45,
+            "ttsPreChimeEnabled": True,
+        }
+        self.assertEqual(res["nonObjectWithCustomFallback"], expected_custom_fallback)
+        self.assertEqual(res["legacyWithCustomFallback"], expected_custom_fallback)
+
+        self.assertEqual(
+            res["invalidAndLow"],
+            {
+                "ttsVoiceId": "sv_SE-alma-medium",
+                "ttsAudioProfile": "arena_pa",
+                "ttsDramaticPauses": True,
+                "ttsSentenceSilenceSec": 0.1,
+                "ttsExpressiveness": 0.3,
+                "ttsArenaReverbMix": 0.0,
+                "ttsPreChimeEnabled": False,
+            },
+        )
+        self.assertEqual(
+            res["highAndTrimmed"],
+            {
+                "ttsVoiceId": "sv_SE-alma-medium",
+                "ttsAudioProfile": "booth",
+                "ttsDramaticPauses": False,
+                "ttsSentenceSilenceSec": 1.5,
+                "ttsExpressiveness": 1.2,
+                "ttsArenaReverbMix": 0.8,
+                "ttsPreChimeEnabled": True,
+            },
+        )
+        self.assertEqual(
+            res["nanNumericStringAndZero"],
+            {
+                "ttsVoiceId": "sv_SE-nst-medium",
+                "ttsAudioProfile": "studio",
+                "ttsDramaticPauses": True,
+                "ttsSentenceSilenceSec": 0.65,
+                "ttsExpressiveness": 0.95,
+                "ttsArenaReverbMix": 0.0,
+                "ttsPreChimeEnabled": False,
+            },
+        )
+        self.assertEqual(
+            res["customConfigSettings"],
+            {
+                "ttsVoiceId": "sv_SE-alma-medium",
+                "ttsAudioProfile": "studio",
+                "ttsDramaticPauses": False,
+                "ttsSentenceSilenceSec": 1.25,
+                "ttsExpressiveness": 0.9,
+                "ttsArenaReverbMix": 0.5,
+                "ttsPreChimeEnabled": True,
+            },
+        )
+        self.assertTrue(res["envelopeMatchesConfig"])
+
+        profiles_by_id = {p["id"]: p["settings"] for p in res["customConfigProfiles"]}
+        self.assertEqual(
+            profiles_by_id["prof-dsp-custom"],
+            {
+                "ttsVoiceId": "sv_SE-alma-medium",
+                "ttsAudioProfile": "booth",
+                "ttsDramaticPauses": False,
+                "ttsSentenceSilenceSec": 0.95,
+                "ttsExpressiveness": 0.85,
+                "ttsArenaReverbMix": 0.6,
+                "ttsPreChimeEnabled": True,
+            },
+        )
+        self.assertEqual(profiles_by_id["prof-dsp-legacy"], {"duckVolume": 0.25})
+        self.assertEqual(
+            profiles_by_id["prof-dsp-invalid"],
+            {
+                "ttsAudioProfile": "arena_pa",
+                "ttsSentenceSilenceSec": 0.1,
+                "ttsExpressiveness": 1.2,
+                "ttsArenaReverbMix": 0.8,
+            },
+        )
+
+        self.assertEqual(res["directLegacy"], {"duckVolume": 0.25})
+        self.assertEqual(
+            res["directCustom"],
+            {
+                "ttsVoiceId": "sv_SE-alma-medium",
+                "ttsAudioProfile": "studio",
+                "ttsDramaticPauses": False,
+                "ttsSentenceSilenceSec": 0.4,
+                "ttsExpressiveness": 1.1,
+                "ttsArenaReverbMix": 0.15,
+                "ttsPreChimeEnabled": True,
+            },
+        )
+        self.assertEqual(
+            res["directInvalidClamp"],
+            {
+                "ttsAudioProfile": "arena_pa",
+                "ttsSentenceSilenceSec": 1.5,
+                "ttsExpressiveness": 0.3,
+                "ttsArenaReverbMix": 0.0,
+            },
+        )
+        self.assertEqual(
+            res["directNaN"],
+            {
+                "ttsSentenceSilenceSec": 0.65,
+                "ttsExpressiveness": 0.75,
+                "ttsArenaReverbMix": 0.28,
             },
         )
 

@@ -53,6 +53,7 @@ export interface TtsAudioPlayerOptions {
   audioProfile?: TtsAudioProfile;
   arenaReverbMix?: number;
   preChimeEnabled?: boolean;
+  voiceId?: PiperVoiceId;
 }
 
 export interface TtsAudioPlayer {
@@ -187,12 +188,22 @@ class BrowserTtsAudioPlayer implements TtsAudioPlayer {
     for (let ch = 0; ch < 2; ch += 1) {
       const channelData = impulse.getChannelData(ch);
       let lpState = 0;
+      let sumSq = 0;
       for (let i = preDelaySamples; i < length; i += 1) {
         const progress = (i - preDelaySamples) / tailLength;
         const envelope = Math.pow(1 - progress, decay);
         const white = Math.random() * 2 - 1;
         lpState = lpState * 0.55 + white * 0.45;
-        channelData[i] = lpState * envelope * 0.6;
+        const sample = lpState * envelope;
+        channelData[i] = sample;
+        sumSq += sample * sample;
+      }
+      const energy = Math.sqrt(sumSq);
+      if (energy > 0) {
+        const normFactor = 0.45 / energy;
+        for (let i = preDelaySamples; i < length; i += 1) {
+          channelData[i] *= normFactor;
+        }
       }
     }
 
@@ -275,12 +286,17 @@ class BrowserTtsAudioPlayer implements TtsAudioPlayer {
       if (dspConfig.slapbackDelaySec > 0) {
         const slapbackDelay = ctx.createDelay(1.0);
         slapbackDelay.delayTime.value = dspConfig.slapbackDelaySec;
+        const slapbackLowpass = ctx.createBiquadFilter();
+        slapbackLowpass.type = 'lowpass';
+        slapbackLowpass.frequency.value = 2600;
+        slapbackLowpass.Q.value = 0.707;
         const slapbackOutGain = ctx.createGain();
-        slapbackOutGain.gain.value = 0.4;
-        nodes.push(slapbackDelay, slapbackOutGain);
+        slapbackOutGain.gain.value = 0.22;
+        nodes.push(slapbackDelay, slapbackLowpass, slapbackOutGain);
 
         makeupGain.connect(slapbackDelay);
-        slapbackDelay.connect(slapbackOutGain);
+        slapbackDelay.connect(slapbackLowpass);
+        slapbackLowpass.connect(slapbackOutGain);
         slapbackOutGain.connect(wetGain);
 
         if (dspConfig.slapbackFeedback > 0) {
@@ -296,15 +312,29 @@ class BrowserTtsAudioPlayer implements TtsAudioPlayer {
         dspConfig.reverbDurationSec > 0 &&
         typeof ctx.createConvolver === 'function'
       ) {
+        const reverbHighpass = ctx.createBiquadFilter();
+        reverbHighpass.type = 'highpass';
+        reverbHighpass.frequency.value = dspConfig.reverbHighpassHz;
+        reverbHighpass.Q.value = 0.707;
+
         const convolver = ctx.createConvolver();
+        convolver.normalize = false;
         convolver.buffer = this.getOrCreateImpulseResponse(
           ctx,
           dspConfig.reverbDurationSec,
           dspConfig.reverbDecay,
         );
-        nodes.push(convolver);
-        makeupGain.connect(convolver);
-        convolver.connect(wetGain);
+
+        const reverbLowpass = ctx.createBiquadFilter();
+        reverbLowpass.type = 'lowpass';
+        reverbLowpass.frequency.value = dspConfig.reverbLowpassHz;
+        reverbLowpass.Q.value = 0.707;
+
+        nodes.push(reverbHighpass, convolver, reverbLowpass);
+        makeupGain.connect(reverbHighpass);
+        reverbHighpass.connect(convolver);
+        convolver.connect(reverbLowpass);
+        reverbLowpass.connect(wetGain);
       }
     }
 
@@ -386,7 +416,8 @@ class BrowserTtsAudioPlayer implements TtsAudioPlayer {
 
     const dspConfig = computeTtsDspChainConfig(
       options.audioProfile ?? 'arena_pa',
-      options.arenaReverbMix ?? 0.28,
+      options.arenaReverbMix ?? 0.22,
+      options.voiceId,
     );
 
     const masterGain = ctx.createGain();
@@ -412,8 +443,17 @@ class BrowserTtsAudioPlayer implements TtsAudioPlayer {
 
     await new Promise<void>((resolve) => {
       let settled = false;
+      let tailTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const clearTailTimer = () => {
+        if (tailTimer !== null) {
+          clearTimeout(tailTimer);
+          tailTimer = null;
+        }
+      };
 
       const teardown = () => {
+        clearTailTimer();
         voiceSource.onended = null;
         options.signal?.removeEventListener('abort', onAbort);
         if (this.activeWebAudioStop === onStop) {
@@ -444,24 +484,39 @@ class BrowserTtsAudioPlayer implements TtsAudioPlayer {
         }
       };
 
-      const finish = () => {
+      const finishImmediate = () => {
         if (settled) return;
         settled = true;
         teardown();
         resolve();
       };
 
+      const onEnded = () => {
+        if (settled) return;
+        const tailMs = dspConfig.wetMix > 0 ? 220 : 0;
+        if (tailMs > 0) {
+          if (tailTimer !== null) {
+            return;
+          }
+          tailTimer = setTimeout(() => {
+            finishImmediate();
+          }, tailMs);
+        } else {
+          finishImmediate();
+        }
+      };
+
       const onStop = () => {
-        finish();
+        finishImmediate();
       };
 
       const onAbort = () => {
-        finish();
+        finishImmediate();
       };
 
       this.activeWebAudioStop = onStop;
       this.activeAbortHandler = onAbort;
-      voiceSource.onended = finish;
+      voiceSource.onended = onEnded;
       options.signal?.addEventListener('abort', onAbort, { once: true });
 
       voiceSource.start(chime.voiceStartTimeSec);
@@ -899,6 +954,7 @@ export class TtsService {
       rate,
       sentenceSilenceSec: settings.ttsSentenceSilenceSec,
       expressiveness: settings.ttsExpressiveness,
+      voiceId,
     });
     const audioProfile: TtsAudioProfile = isValidTtsAudioProfile(
       settings.ttsAudioProfile,
@@ -909,7 +965,7 @@ export class TtsService {
       typeof settings.ttsArenaReverbMix === 'number' &&
       Number.isFinite(settings.ttsArenaReverbMix)
         ? Math.min(0.8, Math.max(0.0, settings.ttsArenaReverbMix))
-        : 0.28;
+        : 0.22;
     const preChimeEnabled = Boolean(settings.ttsPreChimeEnabled);
 
     this.updateState({
@@ -975,6 +1031,7 @@ export class TtsService {
           audioProfile,
           arenaReverbMix,
           preChimeEnabled,
+          voiceId,
         });
 
         if (mySeq !== this.speakSeq || abortController.signal.aborted) {

@@ -116,37 +116,44 @@ export function calculatePiperProsodyParams(options?: {
   rate?: number;
   sentenceSilenceSec?: number;
   expressiveness?: number;
+  voiceId?: PiperVoiceId;
 }): {
   lengthScale: number;
   sentenceSilence: number;
   noiseScale: number;
   noiseW: number;
 } {
-  const lengthScale = calculatePiperLengthScale(options?.rate ?? 1.0);
-  const sentenceSilence = Number(
-    clampNumber(
-      toNumericInput(options?.sentenceSilenceSec),
-      0.1,
-      1.5,
-      0.65,
-    ).toFixed(3),
+  const rawLengthScale = calculatePiperLengthScale(options?.rate ?? 1.0);
+  const lengthScale =
+    options?.voiceId === 'sv_SE-nst-medium'
+      ? Number(clampNumber(rawLengthScale * 0.84, 0.45, 2.0, 0.84).toFixed(3))
+      : rawLengthScale;
+
+  const rawExpr = clampNumber(
+    toNumericInput(options?.expressiveness),
+    0.3,
+    1.2,
+    0.72,
   );
-  const noiseScale = Number(
-    clampNumber(
-      toNumericInput(options?.expressiveness),
-      0.3,
-      1.2,
-      0.75,
-    ).toFixed(3),
-  );
+  const noiseScale =
+    rawExpr <= 0.82
+      ? Number(clampNumber(rawExpr, 0.5, 0.82, 0.72).toFixed(3))
+      : Number((0.82 + ((rawExpr - 0.82) / 0.38) * 0.04).toFixed(3));
   const noiseW = Number(
-    clampNumber(
-      0.8 + (noiseScale - 0.667) * 0.4,
-      0.5,
-      1.1,
-      0.833,
-    ).toFixed(3),
+    clampNumber(0.76 + (noiseScale - 0.667) * 0.45, 0.65, 0.86, 0.784).toFixed(
+      3,
+    ),
   );
+  const rawSilence = clampNumber(
+    toNumericInput(options?.sentenceSilenceSec),
+    0.1,
+    1.5,
+    0.45,
+  );
+  const sentenceSilence =
+    options?.voiceId === 'sv_SE-nst-medium'
+      ? Number(clampNumber(rawSilence * 0.65, 0.1, 0.95, 0.293).toFixed(3))
+      : Number(rawSilence.toFixed(3));
 
   return {
     lengthScale,
@@ -172,19 +179,24 @@ export function formatTextForArenaProsody(
   formatted = formatted
     .replace(/#\s*(\d+)/g, 'nummer $1')
     .replace(/\bnr\.?\s*(\d+)\b/gi, 'nummer $1')
-    .replace(/\b(\d+)\s*min\.?(?=$|[\s,.;:!?)])/gi, '$1 minuter');
+    .replace(/\b(\d+)\s*min\.?(?=$|[\s,.;:!?)])/gi, '$1 minuter')
+    .replace(
+      /\bishockey([a-zåäö]*)\b/gi,
+      (match, suffix = '') =>
+        `${match[0] === 'I' ? 'Ishåcki' : 'ishåcki'}${suffix}`,
+    )
+    .replace(
+      /\bhockey([a-zåäö]*)\b/gi,
+      (match, suffix = '') =>
+        `${match[0] === 'H' ? 'Håcki' : 'håcki'}${suffix}`,
+    );
 
   if (dramaticPauses) {
     formatted = formatted
-      .replace(/\b(nummer\s+\d+)\s*,\s*/gi, '$1. ')
       .replace(
         /\s*(?:,\s*)?\b(Målskytt|Framspelad\s+av|Assisterad\s+av)\b/gi,
         (_match, phrase: string, offset: number) =>
           offset === 0 ? phrase : `. ${phrase}`,
-      )
-      .replace(
-        /\b(Målskytt|Framspelad\s+av|Assisterad\s+av)\b(?=\s+[^\s,.:;!?])/gi,
-        '$1,',
       )
       .replace(
         /\s*(?:,\s*)?(\b\d+\s+minuter\s+för\b)/gi,
@@ -204,40 +216,47 @@ export function formatTextForArenaProsody(
 
 export function computeTtsDspChainConfig(
   profile: TtsAudioProfile,
-  arenaReverbMix = 0.28,
+  arenaReverbMix = 0.22,
+  voiceId?: PiperVoiceId,
 ): TtsDspChainConfig {
   const safeProfile: TtsAudioProfile = isValidTtsAudioProfile(profile)
     ? profile
     : 'arena_pa';
-  const clampedMix = Number(
-    clampNumber(toNumericInput(arenaReverbMix), 0.0, 0.8, 0.28).toFixed(3),
+  const clampedMix = clampNumber(
+    toNumericInput(arenaReverbMix),
+    0.0,
+    0.8,
+    0.22,
   );
+  const voiceHighpass = voiceId === 'sv_SE-nst-medium' ? 145 : 125;
 
   if (safeProfile === 'studio') {
     return {
       profile: 'studio',
       bypass: true,
       highpassHz: 20,
-      chestPeakHz: 210,
+      chestPeakHz: 220,
       chestGainDb: 0,
-      chestQ: 1.1,
-      presencePeakHz: 3200,
+      chestQ: 1.2,
+      presencePeakHz: 3100,
       presenceGainDb: 0,
-      presenceQ: 1.2,
+      presenceQ: 1.1,
       deHarshLowpassHz: 20000,
       deHarshQ: 0.707,
       compressor: {
         thresholdDb: 0,
         kneeDb: 0,
         ratio: 1,
-        attackSec: 0.004,
-        releaseSec: 0.16,
+        attackSec: 0.005,
+        releaseSec: 0.15,
         makeupGain: 1.0,
       },
       slapbackDelaySec: 0,
       slapbackFeedback: 0,
       reverbDurationSec: 0,
-      reverbDecay: 2.4,
+      reverbDecay: 2.8,
+      reverbHighpassHz: 20,
+      reverbLowpassHz: 20000,
       wetMix: 0,
       dryMix: 1.0,
     };
@@ -247,27 +266,29 @@ export function computeTtsDspChainConfig(
     return {
       profile: 'booth',
       bypass: false,
-      highpassHz: 115,
-      chestPeakHz: 210,
-      chestGainDb: 3.0,
-      chestQ: 1.1,
-      presencePeakHz: 3200,
-      presenceGainDb: 3.2,
-      presenceQ: 1.2,
-      deHarshLowpassHz: 7400,
+      highpassHz: voiceHighpass,
+      chestPeakHz: 220,
+      chestGainDb: 2.2,
+      chestQ: 1.2,
+      presencePeakHz: 3100,
+      presenceGainDb: 3.5,
+      presenceQ: 1.1,
+      deHarshLowpassHz: 7800,
       deHarshQ: 0.707,
       compressor: {
-        thresholdDb: -22,
+        thresholdDb: -20,
         kneeDb: 10,
-        ratio: 4.5,
-        attackSec: 0.004,
-        releaseSec: 0.16,
-        makeupGain: 1.22,
+        ratio: 4.0,
+        attackSec: 0.005,
+        releaseSec: 0.15,
+        makeupGain: 1.18,
       },
       slapbackDelaySec: 0,
       slapbackFeedback: 0,
       reverbDurationSec: 0,
-      reverbDecay: 2.4,
+      reverbDecay: 2.8,
+      reverbHighpassHz: 20,
+      reverbLowpassHz: 20000,
       wetMix: 0,
       dryMix: 1.0,
     };
@@ -276,29 +297,31 @@ export function computeTtsDspChainConfig(
   return {
     profile: 'arena_pa',
     bypass: false,
-    highpassHz: 115,
-    chestPeakHz: 210,
-    chestGainDb: 2.5,
-    chestQ: 1.1,
-    presencePeakHz: 3200,
-    presenceGainDb: 3.8,
-    presenceQ: 1.2,
-    deHarshLowpassHz: 7400,
+    highpassHz: voiceHighpass,
+    chestPeakHz: 220,
+    chestGainDb: 1.6,
+    chestQ: 1.2,
+    presencePeakHz: 3100,
+    presenceGainDb: 4.2,
+    presenceQ: 1.1,
+    deHarshLowpassHz: 7800,
     deHarshQ: 0.707,
     compressor: {
-      thresholdDb: -22,
+      thresholdDb: -20,
       kneeDb: 10,
-      ratio: 4.5,
-      attackSec: 0.004,
-      releaseSec: 0.16,
-      makeupGain: 1.22,
+      ratio: 4.0,
+      attackSec: 0.005,
+      releaseSec: 0.15,
+      makeupGain: 1.18,
     },
-    slapbackDelaySec: 0.085,
-    slapbackFeedback: 0.18,
-    reverbDurationSec: 1.35,
-    reverbDecay: 2.4,
-    wetMix: clampedMix,
-    dryMix: 1.0,
+    slapbackDelaySec: 0.075,
+    slapbackFeedback: 0.12,
+    reverbDurationSec: 1.15,
+    reverbDecay: 2.8,
+    reverbHighpassHz: 280,
+    reverbLowpassHz: 2600,
+    wetMix: Number((clampedMix * 0.45).toFixed(3)),
+    dryMix: Number((1.0 - clampedMix * 0.18).toFixed(3)),
   };
 }
 

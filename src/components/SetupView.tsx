@@ -3089,7 +3089,7 @@ function TtsSettingsSection() {
               />
               <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
                 <span>0.1s</span>
-                <span>0.65s</span>
+                <span>0.45s (standard)</span>
                 <span>1.5s</span>
               </div>
             </div>
@@ -3117,7 +3117,7 @@ function TtsSettingsSection() {
               />
               <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
                 <span>0.30</span>
-                <span>0.75</span>
+                <span>0.72</span>
                 <span>1.20</span>
               </div>
             </div>
@@ -3152,7 +3152,7 @@ function TtsSettingsSection() {
               />
               <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
                 <span>0%</span>
-                <span>28% (Standard)</span>
+                <span>22% (standard)</span>
                 <span>80%</span>
               </div>
             </div>
@@ -3326,6 +3326,24 @@ function TtsSettingsSection() {
                   ? '⏹ Stoppa provlyssning'
                   : '🔊 Provlyssna AI-Speaker'}
               </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                updateSettings({
+                  ttsRate: 1.05,
+                  ttsSentenceSilenceSec: 0.45,
+                  ttsExpressiveness: 0.72,
+                  ttsArenaReverbMix: 0.22,
+                  ttsAudioProfile: 'arena_pa',
+                  ttsDramaticPauses: true,
+                })
+              }
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2.5 text-xs font-bold text-slate-200 hover:bg-slate-700 transition-colors cursor-pointer"
+            >
+              <RotateCcw className="h-3.5 w-3.5 text-cyan-400" />
+              <span>Återställ optimal Arena-kalibrering</span>
             </button>
 
             {(ttsState.usedFallback || ttsState.lastError) && (

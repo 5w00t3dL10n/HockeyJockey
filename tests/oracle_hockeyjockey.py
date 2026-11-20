@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 4 Objective Functional Oracle for HockeyJockey.
 
-Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, section 4.2 of 13_oracle_local_audio_files_init.md, section 4.2 of 15_oracle_embedded_media_archive_init.md, section 4.2 of 17_oracle_roster_lookup_and_teleprompter_init.md, section 4.2 of 19_oracle_track_transition_fade_init.md, section 1 of 22_oracle_piper_tts_init.md, AND section 1 of 25_oracle_arena_speaker_dsp_init.md:
+Verifies all requirements in section 4.3 of 03_oracle_and_gate_init.md, section 4.2 of 05_oracle_profiles_hotkeys_init.md, section 4.2 of 07_oracle_away_goal_and_metadata_init.md, section 4 of 09_oracle_spotify_resilience_init.md, section 4 of 11_oracle_custom_soundboard_groups_init.md, section 4.2 of 13_oracle_local_audio_files_init.md, section 4.2 of 15_oracle_embedded_media_archive_init.md, section 4.2 of 17_oracle_roster_lookup_and_teleprompter_init.md, section 4.2 of 19_oracle_track_transition_fade_init.md, section 1 of 22_oracle_piper_tts_init.md, section 1 of 25_oracle_arena_speaker_dsp_init.md, AND section 1 of 27_oracle_arena_speaker_calibration_init.md:
 1. Production build (`npm run build`) and non-empty artifacts in `dist/`.
 2. RFC 7636 Appendix B PKCE SHA-256 test vector via `generatePkceChallenge`.
 3. All 13 penalty definitions in `src/data/penalties.ts` and SVG rendering in `src/components/RefereeIcons.tsx`.
@@ -4150,11 +4150,12 @@ def check_piper_cli_offline_synthesis() -> None:
 
 
 def check_tts_service_audio_controller_smart_interaction() -> None:
-    """Oracle 24: Verify TtsService + AudioController smart interaction in compiled TS/ESM."""
+    """Oracle 24: Verify TtsService + AudioController smart interaction and calibrated NST defaults in compiled TS/ESM."""
     script = """
 import { DEFAULT_SETTINGS } from './src/data/defaults.ts';
 import { AudioController } from './src/services/audioController.ts';
 import { TtsService } from './src/services/ttsService.ts';
+import { calculatePiperProsodyParams } from './src/utils/domain.ts';
 
 function buildFakeWavBuffer() {
   const bytes = new Uint8Array(64);
@@ -4261,6 +4262,9 @@ try {
           kind: 'tts:playWav:start',
           byteLength: buf.byteLength,
           volume: opts.volume,
+          voiceId: opts.voiceId,
+          audioProfile: opts.audioProfile,
+          arenaReverbMix: opts.arenaReverbMix,
           ctrlState: s1Inst.ctrl.getState(),
           ttsState: s1Service.getState(),
         });
@@ -4285,7 +4289,7 @@ try {
   const unsub1 = s1Service.subscribe((st) => {
     s1States.push(st.playbackState);
   });
-  await s1Service.speak('Mål för hemmalaget!', baseSettings, s1Inst.ctrl);
+  await s1Service.speak('Mål för Sundsvall Hockey!', baseSettings, s1Inst.ctrl);
   unsub1();
   const s1FinalCtrl = s1Inst.ctrl.getState();
   const s1FinalTts = s1Service.getState();
@@ -4334,7 +4338,7 @@ try {
       },
     },
   });
-  await s2Service.speak('Utvisning för Sundsvall!', baseSettings, s2Inst.ctrl);
+  await s2Service.speak('Utvisning för Sundsvall Hockey!', baseSettings, s2Inst.ctrl);
   const s2FinalCtrl = s2Inst.ctrl.getState();
   const s2FinalTts = s2Service.getState();
   await s2Inst.ctrl.hardStop();
@@ -4457,6 +4461,17 @@ try {
   await s4Inst.ctrl.hardStop();
 
   console.log(JSON.stringify({
+    calibratedDefaults: {
+      ttsSentenceSilenceSec: DEFAULT_SETTINGS.ttsSentenceSilenceSec,
+      ttsExpressiveness: DEFAULT_SETTINGS.ttsExpressiveness,
+      ttsArenaReverbMix: DEFAULT_SETTINGS.ttsArenaReverbMix,
+    },
+    nstDefaultProsody: calculatePiperProsodyParams({
+      rate: baseSettings.ttsRate,
+      sentenceSilenceSec: baseSettings.ttsSentenceSilenceSec,
+      expressiveness: baseSettings.ttsExpressiveness,
+      voiceId: baseSettings.ttsVoiceId,
+    }),
     scenario1: {
       events: s1Inst.events,
       fetchCalls: s1FetchCalls,
@@ -4492,6 +4507,20 @@ try {
 """
     res = run_ts_script(script, timeout=30)
 
+    if res["calibratedDefaults"] != {
+        "ttsSentenceSilenceSec": 0.45,
+        "ttsExpressiveness": 0.72,
+        "ttsArenaReverbMix": 0.22,
+    }:
+        raise AssertionError(f"DEFAULT_SETTINGS calibration mismatch: {res['calibratedDefaults']!r}")
+    if res["nstDefaultProsody"] != {
+        "lengthScale": 0.84,
+        "sentenceSilence": 0.293,
+        "noiseScale": 0.72,
+        "noiseW": 0.784,
+    }:
+        raise AssertionError(f"NST default prosody mismatch: {res['nstDefaultProsody']!r}")
+
     # Assert Scenario 1: duckVolume -> playWav -> restoreVolume
     s1 = res["scenario1"]
     ev1 = s1["events"]
@@ -4517,8 +4546,11 @@ try {
         abs(play_start1["ctrlState"]["volume"] - 0.25) > 1e-6
         or play_start1["ctrlState"]["isDucked"] is not True
         or play_start1["ttsState"]["playbackState"] != "speaking"
+        or play_start1["voiceId"] != "sv_SE-nst-medium"
+        or play_start1["audioProfile"] != "arena_pa"
+        or abs(play_start1["arenaReverbMix"] - 0.22) > 1e-6
     ):
-        raise AssertionError(f"Scenario 1 TTS started before music ducked to 0.25: {play_start1!r}")
+        raise AssertionError(f"Scenario 1 playWav started in wrong state/options: {play_start1!r}")
     if abs(restore_end1["volAfter"] - 1.0) > 1e-6 or restore_end1["isDuckedAfter"] is not False:
         raise AssertionError(f"Scenario 1 restoreVolume did not restore to 1.0: {restore_end1!r}")
     if s1["speechCallsCount"] != 0:
@@ -4526,12 +4558,12 @@ try {
     if len(s1["fetchCalls"]) != 1 or s1["fetchCalls"][0]["url"] != "/api/tts" or s1["fetchCalls"][0]["method"] != "POST":
         raise AssertionError(f"Scenario 1 unexpected fetch calls: {s1['fetchCalls']!r}")
     if s1["fetchCalls"][0]["body"] != {
-        "text": "Mål för hemmalaget!",
+        "text": "Mål för Sundsvall Håcki!",
         "voiceId": "sv_SE-nst-medium",
         "rate": 1.0,
-        "sentenceSilence": 0.65,
-        "noiseScale": 0.75,
-        "noiseW": 0.833,
+        "sentenceSilence": 0.293,
+        "noiseScale": 0.72,
+        "noiseW": 0.784,
     }:
         raise AssertionError(f"Scenario 1 unexpected POST body: {s1['fetchCalls'][0]['body']!r}")
     if s1["finalCtrl"]["isPlaying"] is not True or abs(s1["finalCtrl"]["volume"] - 1.0) > 1e-6 or s1["finalCtrl"]["isDucked"] is not False:
@@ -4560,7 +4592,8 @@ try {
         raise AssertionError(f"Scenario 2 Web Speech fallback sequence invalid: {kinds2!r}")
     ws_start2 = ev2[indices2[2]]
     if (
-        ws_start2["lang"] != "sv-SE"
+        ws_start2["text"] != "Utvisning för Sundsvall Håcki!"
+        or ws_start2["lang"] != "sv-SE"
         or abs(ws_start2["ctrlState"]["volume"] - 0.25) > 1e-6
         or ws_start2["ctrlState"]["isDucked"] is not True
         or ws_start2["ttsState"]["usedFallback"] is not True
@@ -4893,7 +4926,7 @@ def check_piper_cli_alma_and_vits_prosody() -> None:
 
 
 def check_tts_service_prosody_and_dsp_coordination() -> None:
-    """Oracle 27: Verify TtsService formats arena prosody, sends VITS params, forwards DSP options, and preserves AudioController coordination."""
+    """Oracle 27: Verify TtsService calibrated Arena prosody, VITS sweet-spot & NST params, DSP voiceId forwarding, and AudioController coordination."""
     script = """
 import { DEFAULT_SETTINGS } from './src/data/defaults.ts';
 import { AudioController } from './src/services/audioController.ts';
@@ -4994,6 +5027,7 @@ try {
         playWavCallsA.push({
           byteLength: buf.byteLength,
           volume: opts.volume,
+          voiceId: opts.voiceId,
           audioProfile: opts.audioProfile,
           arenaReverbMix: opts.arenaReverbMix,
           preChimeEnabled: opts.preChimeEnabled,
@@ -5069,6 +5103,7 @@ try {
       playWav: async (_buf, opts) => {
         playWavCallsB.push({
           volume: opts.volume,
+          voiceId: opts.voiceId,
           audioProfile: opts.audioProfile,
           arenaReverbMix: opts.arenaReverbMix,
           preChimeEnabled: opts.preChimeEnabled,
@@ -5165,23 +5200,99 @@ try {
   const finalTtsC = svcC.getState();
   await instC.ctrl.hardStop();
 
+  // Scenario D: NST calibrated defaults (0.45 / 0.72 / 0.22) with duckVolume -> playWav -> restoreVolume
+  const instD = createInstrumentedController();
+  controllers.push(instD.ctrl);
+  await instD.ctrl.playAt('spotify:track:4uLU6hMCjMI75M1A2tKUQC', 0, 1.0);
+  instD.events.length = 0;
+
+  const fetchCallsD = [];
+  const playWavCallsD = [];
+  const svcD = new TtsService({
+    fetch: async (url, init) => {
+      fetchCallsD.push({
+        url,
+        method: init?.method ?? 'GET',
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : null,
+      });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+        arrayBuffer: async () => buildFakeWavBuffer(),
+      };
+    },
+    audioPlayer: {
+      playWav: async (_buf, opts) => {
+        playWavCallsD.push({
+          volume: opts.volume,
+          voiceId: opts.voiceId,
+          audioProfile: opts.audioProfile,
+          arenaReverbMix: opts.arenaReverbMix,
+          preChimeEnabled: opts.preChimeEnabled,
+        });
+        instD.events.push({
+          kind: 'tts:playWav:start',
+          ctrlState: instD.ctrl.getState(),
+        });
+        await new Promise((r) => setTimeout(r, 30));
+        instD.events.push({
+          kind: 'tts:playWav:end',
+          ctrlState: instD.ctrl.getState(),
+        });
+      },
+      stop: () => {},
+    },
+    speechSynthesizer: {
+      isSupported: () => true,
+      speak: async () => {},
+      cancel: () => {},
+    },
+  });
+
+  const rawNstGoalText = 'Mål för Sundsvall Hockey! Målskytt #12, Emil Lindblom.';
+  const settingsD = {
+    ...DEFAULT_SETTINGS,
+    ttsEnabled: true,
+    ttsEngine: 'piper',
+    ttsVoiceId: 'sv_SE-nst-medium',
+    ttsRate: 1.0,
+    ttsVolume: 1.0,
+    duckVolume: 0.25,
+    ttsRestoreMusicAfter: true,
+  };
+  await svcD.speak(rawNstGoalText, settingsD, instD.ctrl);
+  const finalCtrlD = instD.ctrl.getState();
+  await instD.ctrl.hardStop();
+
   console.log(JSON.stringify({
     expectedFormattedA: formatTextForArenaProsody(rawGoalText, true),
     expectedProsodyA: calculatePiperProsodyParams({
       rate: 1.0,
       sentenceSilenceSec: 0.85,
       expressiveness: 0.95,
+      voiceId: 'sv_SE-alma-medium',
     }),
     expectedFormattedB: formatTextForArenaProsody(rawPenaltyText, false),
     expectedProsodyB: calculatePiperProsodyParams({
       rate: 1.0,
       sentenceSilenceSec: 0.4,
       expressiveness: 0.6,
+      voiceId: 'sv_SE-lisa-medium',
+    }),
+    expectedFormattedD: formatTextForArenaProsody(rawNstGoalText, true),
+    expectedProsodyD: calculatePiperProsodyParams({
+      rate: 1.0,
+      sentenceSilenceSec: settingsD.ttsSentenceSilenceSec,
+      expressiveness: settingsD.ttsExpressiveness,
+      voiceId: 'sv_SE-nst-medium',
     }),
     dspConfigs: {
       studio: computeTtsDspChainConfig('studio', 0.4),
-      booth: computeTtsDspChainConfig('booth', 0.4),
-      arena_pa: computeTtsDspChainConfig('arena_pa', 0.42),
+      boothAlma: computeTtsDspChainConfig('booth', 0.4, 'sv_SE-alma-medium'),
+      boothNst: computeTtsDspChainConfig('booth', 0.4, 'sv_SE-nst-medium'),
+      arenaAlma: computeTtsDspChainConfig('arena_pa', 0.42, 'sv_SE-alma-medium'),
+      arenaNstDefault: computeTtsDspChainConfig('arena_pa', 0.22, 'sv_SE-nst-medium'),
     },
     scenarioA: {
       events: instA.events,
@@ -5200,6 +5311,12 @@ try {
       abortedObserved: abortedObservedC,
       finalCtrl: finalCtrlC,
       finalTts: finalTtsC,
+    },
+    scenarioD: {
+      events: instD.events,
+      fetchCalls: fetchCallsD,
+      playWavCalls: playWavCallsD,
+      finalCtrl: finalCtrlD,
     },
   }));
 } finally {
@@ -5237,14 +5354,21 @@ try {
     }
     if body_a != expected_body_a:
         raise AssertionError(f"Scenario A POST body mismatch: expected {expected_body_a!r}, got {body_a!r}")
-    if "nummer 12. Emil Lindblom. Framspelad av, nummer 14" not in body_a["text"]:
-        raise AssertionError(f"Scenario A text not formatted with arena prosody: {body_a['text']!r}")
+    if body_a["text"] != "Mål för Sundsvall Håcki! Målskytt nummer 12, Emil Lindblom. Framspelad av nummer 14 Erik Svensson.":
+        raise AssertionError(f"Scenario A calibrated spokenText mismatch: {body_a['text']!r}")
+    if "nummer 12, Emil Lindblom. Framspelad av nummer 14" not in body_a["text"]:
+        raise AssertionError(f"Scenario A text must keep 'nummer 12, Emil Lindblom' without mid-phrase period: {body_a['text']!r}")
+    if not (0.50 <= body_a["noiseScale"] <= 0.86) or not (0.65 <= body_a["noiseW"] <= 0.86):
+        raise AssertionError(f"Scenario A VITS sweet-spot out of range: {body_a!r}")
+    if abs(res["expectedProsodyA"]["lengthScale"] - 1.0) > 1e-6:
+        raise AssertionError(f"Scenario A Alma lengthScale should be 1.0: {res['expectedProsodyA']!r}")
 
     if len(s_a["playWavCalls"]) != 1:
         raise AssertionError(f"Scenario A expected 1 playWav call, got {s_a['playWavCalls']!r}")
     pw_a = s_a["playWavCalls"][0]
     if (
         abs(pw_a["volume"] - 0.85) > 1e-6
+        or pw_a["voiceId"] != "sv_SE-alma-medium"
         or pw_a["audioProfile"] != "arena_pa"
         or abs(pw_a["arenaReverbMix"] - 0.42) > 1e-6
         or pw_a["preChimeEnabled"] is not True
@@ -5271,13 +5395,16 @@ try {
         raise AssertionError(f"Scenario B POST body mismatch: expected {expected_body_b!r}, got {body_b!r}")
     if body_b["text"] != "Utvisning nummer 6, Erik Lind, 2 minuter för hakning.":
         raise AssertionError(f"Scenario B dramaticPauses=false text unexpected: {body_b['text']!r}")
+    if abs(res["expectedProsodyB"]["lengthScale"] - 1.0) > 1e-6:
+        raise AssertionError(f"Scenario B Lisa lengthScale should be 1.0: {res['expectedProsodyB']!r}")
     pw_b = s_b["playWavCalls"][0]
     if (
-        pw_b["audioProfile"] != "booth"
+        pw_b["voiceId"] != "sv_SE-lisa-medium"
+        or pw_b["audioProfile"] != "booth"
         or abs(pw_b["arenaReverbMix"] - 0.8) > 1e-6
         or pw_b["preChimeEnabled"] is not False
     ):
-        raise AssertionError(f"Scenario B playWav options mismatch (expected clamped reverb 0.8 & booth): {pw_b!r}")
+        raise AssertionError(f"Scenario B playWav options mismatch (expected clamped reverb 0.8, voiceId & booth): {pw_b!r}")
 
     s_c = res["scenarioC"]
     kinds_c = [e["kind"] for e in s_c["events"]]
@@ -5290,22 +5417,75 @@ try {
     if s_c["finalTts"]["playbackState"] != "idle":
         raise AssertionError(f"Scenario C TtsService did not return to idle: {s_c['finalTts']!r}")
 
-    dsp = res["dspConfigs"]
-    if not (dsp["studio"]["bypass"] is True and dsp["studio"]["wetMix"] == 0):
-        raise AssertionError(f"Invalid studio DSP config: {dsp['studio']!r}")
-    if not (dsp["booth"]["bypass"] is False and dsp["booth"]["wetMix"] == 0 and dsp["booth"]["deHarshLowpassHz"] == 7400):
-        raise AssertionError(f"Invalid booth DSP config: {dsp['booth']!r}")
-    if not (
-        dsp["arena_pa"]["bypass"] is False
-        and abs(dsp["arena_pa"]["wetMix"] - 0.42) < 1e-6
-        and abs(dsp["arena_pa"]["slapbackDelaySec"] - 0.085) < 1e-6
-        and abs(dsp["arena_pa"]["reverbDurationSec"] - 1.35) < 1e-6
+    s_d = res["scenarioD"]
+    kinds_d = [e["kind"] for e in s_d["events"]]
+    idx_d = [kinds_d.index(k) if k in kinds_d else -1 for k in req_seq]
+    if any(i < 0 for i in idx_d) or idx_d != sorted(idx_d):
+        raise AssertionError(f"Scenario D NST duck->speak->restore sequence invalid: {kinds_d!r}")
+    body_d = s_d["fetchCalls"][0]["body"]
+    if body_d != {
+        "text": "Mål för Sundsvall Håcki! Målskytt nummer 12, Emil Lindblom.",
+        "voiceId": "sv_SE-nst-medium",
+        "rate": 1.0,
+        "sentenceSilence": 0.293,
+        "noiseScale": 0.72,
+        "noiseW": 0.784,
+    }:
+        raise AssertionError(f"Scenario D NST calibrated POST body mismatch: {body_d!r}")
+    if res["expectedProsodyD"]["lengthScale"] != 0.84:
+        raise AssertionError(f"Scenario D NST lengthScale mismatch: {res['expectedProsodyD']!r}")
+    pw_d = s_d["playWavCalls"][0]
+    if (
+        pw_d["voiceId"] != "sv_SE-nst-medium"
+        or pw_d["audioProfile"] != "arena_pa"
+        or abs(pw_d["arenaReverbMix"] - 0.22) > 1e-6
     ):
-        raise AssertionError(f"Invalid arena_pa DSP config: {dsp['arena_pa']!r}")
+        raise AssertionError(f"Scenario D NST playWav options mismatch: {pw_d!r}")
+    if s_d["finalCtrl"]["isPlaying"] is not True or abs(s_d["finalCtrl"]["volume"] - 1.0) > 1e-6 or s_d["finalCtrl"]["isDucked"] is not False:
+        raise AssertionError(f"Scenario D final AudioController state invalid: {s_d['finalCtrl']!r}")
+
+    dsp = res["dspConfigs"]
+    if not (
+        dsp["studio"]["bypass"] is True
+        and dsp["studio"]["wetMix"] == 0
+        and dsp["studio"]["dryMix"] == 1.0
+        and dsp["studio"]["reverbHighpassHz"] == 20
+        and dsp["studio"]["reverbLowpassHz"] == 20000
+    ):
+        raise AssertionError(f"Invalid studio DSP config: {dsp['studio']!r}")
+    if not (
+        dsp["boothAlma"]["bypass"] is False
+        and dsp["boothAlma"]["wetMix"] == 0
+        and dsp["boothAlma"]["dryMix"] == 1.0
+        and dsp["boothAlma"]["highpassHz"] == 125
+        and dsp["boothAlma"]["deHarshLowpassHz"] == 7800
+        and dsp["boothNst"]["highpassHz"] == 145
+    ):
+        raise AssertionError(f"Invalid booth DSP config: alma={dsp['boothAlma']!r}, nst={dsp['boothNst']!r}")
+    if not (
+        dsp["arenaAlma"]["bypass"] is False
+        and dsp["arenaAlma"]["highpassHz"] == 125
+        and dsp["arenaAlma"]["reverbHighpassHz"] == 280
+        and dsp["arenaAlma"]["reverbLowpassHz"] == 2600
+        and abs(dsp["arenaAlma"]["wetMix"] - 0.189) < 1e-6
+        and abs(dsp["arenaAlma"]["dryMix"] - 0.924) < 1e-6
+        and abs(dsp["arenaAlma"]["slapbackDelaySec"] - 0.075) < 1e-6
+        and abs(dsp["arenaAlma"]["slapbackFeedback"] - 0.12) < 1e-6
+        and abs(dsp["arenaAlma"]["reverbDurationSec"] - 1.15) < 1e-6
+    ):
+        raise AssertionError(f"Invalid arena_pa Alma DSP config: {dsp['arenaAlma']!r}")
+    if not (
+        dsp["arenaNstDefault"]["highpassHz"] == 145
+        and dsp["arenaNstDefault"]["reverbHighpassHz"] == 280
+        and dsp["arenaNstDefault"]["reverbLowpassHz"] == 2600
+        and abs(dsp["arenaNstDefault"]["wetMix"] - 0.099) < 1e-6
+        and abs(dsp["arenaNstDefault"]["dryMix"] - 0.96) < 1e-6
+    ):
+        raise AssertionError(f"Invalid arena_pa NST default DSP config: {dsp['arenaNstDefault']!r}")
 
 
 def check_tts_dsp_prosody_roundtrip_and_static_wiring() -> None:
-    """Oracle 28: Verify 6 new tts* fields + Alma round-trip across store/MatchProfile/JSON and static Vite/UI wiring."""
+    """Oracle 28: Verify 6 new tts* fields + Alma round-trip across store/MatchProfile/JSON and static Vite/DSP/UI calibration wiring."""
     script = """
 import { DEFAULT_MATCH_PROFILES, DEFAULT_SETTINGS } from './src/data/defaults.ts';
 import { useAppStore } from './src/store/useAppStore.ts';
@@ -5400,9 +5580,9 @@ console.log(JSON.stringify({
         "ttsVoiceId": "sv_SE-nst-medium",
         "ttsAudioProfile": "arena_pa",
         "ttsDramaticPauses": True,
-        "ttsSentenceSilenceSec": 0.65,
-        "ttsExpressiveness": 0.75,
-        "ttsArenaReverbMix": 0.28,
+        "ttsSentenceSilenceSec": 0.45,
+        "ttsExpressiveness": 0.72,
+        "ttsArenaReverbMix": 0.22,
         "ttsPreChimeEnabled": False,
     }
     expected_custom = {
@@ -5464,11 +5644,24 @@ console.log(JSON.stringify({
         "sentenceSilence",
         "noiseScale",
         "noiseW",
+        "0.86",
     ):
         if token not in vite_src:
             raise AssertionError(f"vite.config.ts missing required VITS prosody / Alma token: {token!r}")
 
-    # Static verification of SetupView.tsx DSP/prosody/Alma UI controls
+    # Static verification of ttsService.ts L2-normed convolver & bandpass reverb DSP wiring
+    tts_src = (PROJECT_ROOT / "src" / "services" / "ttsService.ts").read_text(encoding="utf-8")
+    for token in (
+        "convolver.normalize = false",
+        "reverbHighpass",
+        "reverbLowpass",
+        "0.45 / energy",
+        "options.voiceId",
+    ):
+        if token not in tts_src:
+            raise AssertionError(f"ttsService.ts missing required calibrated DSP token: {token!r}")
+
+    # Static verification of SetupView.tsx DSP/prosody/Alma/Calibration UI controls
     setup_src = (PROJECT_ROOT / "src" / "components" / "SetupView.tsx").read_text(encoding="utf-8")
     for token in (
         "sv_SE-alma-medium",
@@ -5487,6 +5680,10 @@ console.log(JSON.stringify({
         "Arena-klang / PA-eko",
         "Svensk Arena-dramaturgi",
         "Spela kort PA-gong före utrop",
+        "Återställ optimal Arena-kalibrering",
+        "0.45s (standard)",
+        "0.72",
+        "22% (standard)",
     ):
         if token not in setup_src:
             raise AssertionError(f"SetupView.tsx missing required DSP/prosody/Alma UI token: {token!r}")

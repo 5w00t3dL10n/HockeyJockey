@@ -935,23 +935,41 @@ export function createPiperTtsMiddleware(): Connect.NextHandleFunction {
         const baseProsody = calculatePiperProsodyParams({
           rate: parsedRate,
           sentenceSilenceSec: parsedSentenceSilence,
-          expressiveness: parsedNoiseScale ?? parsedExpressiveness,
+          expressiveness: parsedExpressiveness,
+          voiceId,
         });
-        const noiseW =
-          parsedNoiseW !== undefined && !Number.isNaN(parsedNoiseW)
-            ? Number(
-                (
-                  !Number.isFinite(parsedNoiseW)
-                    ? parsedNoiseW > 0
-                      ? 1.1
-                      : 0.5
-                    : Math.min(1.1, Math.max(0.5, parsedNoiseW))
-                ).toFixed(3),
-              )
-            : baseProsody.noiseW;
+        const hasExpressiveness =
+          parsedExpressiveness !== undefined &&
+          !Number.isNaN(parsedExpressiveness);
+
+        const clampProsodyParam = (
+          value: number | undefined,
+          min: number,
+          max: number,
+        ): number | undefined => {
+          if (value === undefined || Number.isNaN(value)) {
+            return undefined;
+          }
+          const clamped = !Number.isFinite(value)
+            ? value > 0
+              ? max
+              : min
+            : Math.min(max, Math.max(min, value));
+          return Number(clamped.toFixed(3));
+        };
+
         const lengthScale = baseProsody.lengthScale;
-        const sentenceSilence = baseProsody.sentenceSilence;
-        const noiseScale = baseProsody.noiseScale;
+        const sentenceSilence = !hasExpressiveness
+          ? (clampProsodyParam(parsedSentenceSilence, 0.1, 1.5) ??
+            baseProsody.sentenceSilence)
+          : baseProsody.sentenceSilence;
+        const noiseScale = !hasExpressiveness
+          ? (clampProsodyParam(parsedNoiseScale, 0.5, 0.86) ??
+            baseProsody.noiseScale)
+          : baseProsody.noiseScale;
+        const noiseW = !hasExpressiveness
+          ? (clampProsodyParam(parsedNoiseW, 0.65, 0.86) ?? baseProsody.noiseW)
+          : baseProsody.noiseW;
 
         const piperRoot = getPiperRootDir();
         const voiceEntry = PIPER_VOICE_MAP.get(voiceId);

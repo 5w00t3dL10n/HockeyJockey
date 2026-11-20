@@ -107,6 +107,8 @@ export interface TtsDspChainConfig {
   slapbackFeedback: number;
   reverbDurationSec: number;
   reverbDecay: number;
+  reverbHighpassHz: number;
+  reverbLowpassHz: number;
   wetMix: number;
   dryMix: number;
 }
@@ -138,9 +140,9 @@ export interface AppSettings {
   ttsRestoreMusicAfter: boolean;
   ttsAudioProfile: TtsAudioProfile;
   ttsDramaticPauses: boolean;
-  ttsSentenceSilenceSec: number; // 0.1–1.5 (default 0.65)
-  ttsExpressiveness: number; // 0.3–1.2 (default 0.75)
-  ttsArenaReverbMix: number; // 0.0–0.8 (default 0.28)
+  ttsSentenceSilenceSec: number; // 0.1–1.5 (default 0.45)
+  ttsExpressiveness: number; // 0.3–1.2 (default 0.72)
+  ttsArenaReverbMix: number; // 0.0–0.8 (default 0.22)
   ttsPreChimeEnabled: boolean;
   spotifyClientId: string;
   spotifyRedirectUri: string;

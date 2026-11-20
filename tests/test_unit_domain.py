@@ -3145,13 +3145,14 @@ console.log(JSON.stringify({
         )
 
     def test_27_calculate_piper_prosody_params(self) -> None:
-        """Verify calculatePiperProsodyParams defaults, custom values, clamping, noiseW range, and zero/NaN safety."""
+        """Verify calculatePiperProsodyParams calibrated defaults, VITS sweet-spot clamping, NST compensation, and zero/NaN safety."""
         script = """
 import { calculatePiperProsodyParams } from './src/utils/domain.ts';
 
 console.log(JSON.stringify({
   noArg: calculatePiperProsodyParams(),
   emptyObj: calculatePiperProsodyParams({}),
+  nstDefault: calculatePiperProsodyParams({ voiceId: 'sv_SE-nst-medium' }),
   customValid: calculatePiperProsodyParams({
     rate: 1.25,
     sentenceSilenceSec: 0.9,
@@ -3213,19 +3214,28 @@ console.log(JSON.stringify({
 
         expected_default = {
             "lengthScale": 1.0,
-            "sentenceSilence": 0.65,
-            "noiseScale": 0.75,
-            "noiseW": 0.833,
+            "sentenceSilence": 0.45,
+            "noiseScale": 0.72,
+            "noiseW": 0.784,
         }
         self.assertEqual(res["noArg"], expected_default)
         self.assertEqual(res["emptyObj"], expected_default)
+        self.assertEqual(
+            res["nstDefault"],
+            {
+                "lengthScale": 0.84,
+                "sentenceSilence": 0.293,
+                "noiseScale": 0.72,
+                "noiseW": 0.784,
+            },
+        )
         self.assertEqual(
             res["customValid"],
             {
                 "lengthScale": 0.8,
                 "sentenceSilence": 0.9,
-                "noiseScale": 1.05,
-                "noiseW": 0.953,
+                "noiseScale": 0.844,
+                "noiseW": 0.84,
             },
         )
         self.assertEqual(
@@ -3233,8 +3243,8 @@ console.log(JSON.stringify({
             {
                 "lengthScale": 2.0,
                 "sentenceSilence": 0.1,
-                "noiseScale": 0.3,
-                "noiseW": 0.653,
+                "noiseScale": 0.5,
+                "noiseW": 0.685,
             },
         )
         self.assertEqual(
@@ -3242,8 +3252,8 @@ console.log(JSON.stringify({
             {
                 "lengthScale": 0.5,
                 "sentenceSilence": 1.5,
-                "noiseScale": 1.2,
-                "noiseW": 1.013,
+                "noiseScale": 0.86,
+                "noiseW": 0.847,
             },
         )
         self.assertEqual(
@@ -3251,8 +3261,8 @@ console.log(JSON.stringify({
             {
                 "lengthScale": 2.0,
                 "sentenceSilence": 0.1,
-                "noiseScale": 0.3,
-                "noiseW": 0.653,
+                "noiseScale": 0.5,
+                "noiseW": 0.685,
             },
         )
         self.assertEqual(
@@ -3260,8 +3270,8 @@ console.log(JSON.stringify({
             {
                 "lengthScale": 0.5,
                 "sentenceSilence": 1.5,
-                "noiseScale": 1.2,
-                "noiseW": 1.013,
+                "noiseScale": 0.86,
+                "noiseW": 0.847,
             },
         )
         self.assertEqual(
@@ -3269,8 +3279,8 @@ console.log(JSON.stringify({
             {
                 "lengthScale": 1.0,
                 "sentenceSilence": 0.1,
-                "noiseScale": 0.3,
-                "noiseW": 0.653,
+                "noiseScale": 0.5,
+                "noiseW": 0.685,
             },
         )
         self.assertEqual(
@@ -3278,8 +3288,8 @@ console.log(JSON.stringify({
             {
                 "lengthScale": 1.0,
                 "sentenceSilence": 0.1,
-                "noiseScale": 0.3,
-                "noiseW": 0.653,
+                "noiseScale": 0.5,
+                "noiseW": 0.685,
             },
         )
         self.assertEqual(res["nans"], expected_default)
@@ -3288,8 +3298,8 @@ console.log(JSON.stringify({
             {
                 "lengthScale": 1.0,
                 "sentenceSilence": 1.5,
-                "noiseScale": 1.2,
-                "noiseW": 1.013,
+                "noiseScale": 0.86,
+                "noiseW": 0.847,
             },
         )
         self.assertEqual(
@@ -3297,8 +3307,8 @@ console.log(JSON.stringify({
             {
                 "lengthScale": 1.0,
                 "sentenceSilence": 0.1,
-                "noiseScale": 0.3,
-                "noiseW": 0.653,
+                "noiseScale": 0.5,
+                "noiseW": 0.685,
             },
         )
         self.assertEqual(res["invalidStrings"], expected_default)
@@ -3306,17 +3316,18 @@ console.log(JSON.stringify({
         for key, params in res.items():
             self.assertGreaterEqual(params["sentenceSilence"], 0.1, key)
             self.assertLessEqual(params["sentenceSilence"], 1.5, key)
-            self.assertGreaterEqual(params["noiseScale"], 0.3, key)
-            self.assertLessEqual(params["noiseScale"], 1.2, key)
-            self.assertGreaterEqual(params["noiseW"], 0.5, key)
-            self.assertLessEqual(params["noiseW"], 1.1, key)
+            self.assertGreaterEqual(params["noiseScale"], 0.50, key)
+            self.assertLessEqual(params["noiseScale"], 0.86, key)
+            self.assertGreaterEqual(params["noiseW"], 0.65, key)
+            self.assertLessEqual(params["noiseW"], 0.86, key)
 
     def test_28_format_text_for_arena_prosody(self) -> None:
-        """Verify formatTextForArenaProsody with dramaticPauses on/off, #/nr/min expansion, pauses, and empty strings."""
+        """Verify formatTextForArenaProsody with calibrated phrasing (no mid-phrase period), pauses before key clauses, Hockey->Håcki, and empty strings."""
         script = """
 import { formatTextForArenaProsody } from './src/utils/domain.ts';
 
 const goalInput = 'Mål för Sundsvall Hockey! Målskytt #12, Emil Lindblom, Framspelad av nr 14 Erik Svensson.';
+const goalAssistedInput = 'Mål för Timrå IK! Målskytt #9, Matteo Sandström, Assisterad av #11, Tilda Vikman.';
 const penaltyInput = 'Sundsvall Hockey drar på sig en utvisning genom #22, Rasmus Karlsson, 2 min för hakning.';
 const nrDotMinDotInput = 'nr. 6 får 5 min. för slashing';
 const leadingGoalPhrase = 'Målskytt #12, Emil Lindblom';
@@ -3328,6 +3339,7 @@ console.log(JSON.stringify({
   goalDramaticOn: formatTextForArenaProsody(goalInput, true),
   goalDramaticDefault: formatTextForArenaProsody(goalInput),
   goalDramaticOff: formatTextForArenaProsody(goalInput, false),
+  goalAssistedOn: formatTextForArenaProsody(goalAssistedInput, true),
   penaltyDramaticOn: formatTextForArenaProsody(penaltyInput, true),
   penaltyDramaticOff: formatTextForArenaProsody(penaltyInput, false),
   nrDotMinDotOn: formatTextForArenaProsody(nrDotMinDotInput, true),
@@ -3342,23 +3354,27 @@ console.log(JSON.stringify({
         self.assertEqual(res["nonString"], "")
 
         expected_goal_on = (
-            "Mål för Sundsvall Hockey! Målskytt, nummer 12. Emil Lindblom. "
-            "Framspelad av, nummer 14 Erik Svensson."
+            "Mål för Sundsvall Håcki! Målskytt nummer 12, Emil Lindblom. "
+            "Framspelad av nummer 14 Erik Svensson."
         )
         self.assertEqual(res["goalDramaticOn"], expected_goal_on)
         self.assertEqual(res["goalDramaticDefault"], expected_goal_on)
         self.assertEqual(
             res["goalDramaticOff"],
-            "Mål för Sundsvall Hockey! Målskytt nummer 12, Emil Lindblom, Framspelad av nummer 14 Erik Svensson.",
+            "Mål för Sundsvall Håcki! Målskytt nummer 12, Emil Lindblom, Framspelad av nummer 14 Erik Svensson.",
+        )
+        self.assertEqual(
+            res["goalAssistedOn"],
+            "Mål för Timrå IK! Målskytt nummer 9, Matteo Sandström. Assisterad av nummer 11, Tilda Vikman.",
         )
 
         self.assertEqual(
             res["penaltyDramaticOn"],
-            "Sundsvall Hockey drar på sig en utvisning genom nummer 22. Rasmus Karlsson. 2 minuter för hakning.",
+            "Sundsvall Håcki drar på sig en utvisning genom nummer 22, Rasmus Karlsson. 2 minuter för hakning.",
         )
         self.assertEqual(
             res["penaltyDramaticOff"],
-            "Sundsvall Hockey drar på sig en utvisning genom nummer 22, Rasmus Karlsson, 2 minuter för hakning.",
+            "Sundsvall Håcki drar på sig en utvisning genom nummer 22, Rasmus Karlsson, 2 minuter för hakning.",
         )
 
         self.assertEqual(
@@ -3371,20 +3387,27 @@ console.log(JSON.stringify({
         )
         self.assertEqual(
             res["leadingPhraseOn"],
-            "Målskytt, nummer 12. Emil Lindblom",
+            "Målskytt nummer 12, Emil Lindblom",
         )
 
     def test_29_compute_tts_dsp_chain_config(self) -> None:
-        """Verify computeTtsDspChainConfig for studio, booth, arena_pa, and arenaReverbMix clamping."""
+        """Verify computeTtsDspChainConfig for studio, booth, arena_pa, bandpass reverb, voice highpass, and wet/dry mix scaling."""
         script = """
 import { computeTtsDspChainConfig } from './src/utils/domain.ts';
 
 console.log(JSON.stringify({
   studioDefault: computeTtsDspChainConfig('studio'),
   studioWithMixArg: computeTtsDspChainConfig('studio', 0.6),
+  studioWithNst: computeTtsDspChainConfig('studio', 0.6, 'sv_SE-nst-medium'),
   boothDefault: computeTtsDspChainConfig('booth'),
   boothWithMixArg: computeTtsDspChainConfig('booth', 0.5),
+  boothNst: computeTtsDspChainConfig('booth', 0.22, 'sv_SE-nst-medium'),
+  boothAlma: computeTtsDspChainConfig('booth', 0.22, 'sv_SE-alma-medium'),
+  boothLisa: computeTtsDspChainConfig('booth', 0.22, 'sv_SE-lisa-medium'),
   arenaDefault: computeTtsDspChainConfig('arena_pa'),
+  arenaNst: computeTtsDspChainConfig('arena_pa', 0.22, 'sv_SE-nst-medium'),
+  arenaAlma: computeTtsDspChainConfig('arena_pa', 0.22, 'sv_SE-alma-medium'),
+  arenaLisa: computeTtsDspChainConfig('arena_pa', 0.22, 'sv_SE-lisa-medium'),
   arenaCustomMix: computeTtsDspChainConfig('arena_pa', 0.45),
   arenaClampLow: computeTtsDspChainConfig('arena_pa', -0.5),
   arenaClampZero: computeTtsDspChainConfig('arena_pa', 0.0),
@@ -3400,44 +3423,70 @@ console.log(JSON.stringify({
         studio = res["studioDefault"]
         self.assertEqual(studio["profile"], "studio")
         self.assertIs(studio["bypass"], True)
+        self.assertEqual(studio["highpassHz"], 20)
+        self.assertEqual(studio["reverbHighpassHz"], 20)
+        self.assertEqual(studio["reverbLowpassHz"], 20000)
         self.assertEqual(studio["wetMix"], 0)
         self.assertEqual(studio["dryMix"], 1.0)
         self.assertEqual(studio["slapbackDelaySec"], 0)
         self.assertEqual(studio["reverbDurationSec"], 0)
         self.assertEqual(res["studioWithMixArg"]["wetMix"], 0)
         self.assertIs(res["studioWithMixArg"]["bypass"], True)
+        self.assertEqual(res["studioWithNst"]["highpassHz"], 20)
 
         booth = res["boothDefault"]
         self.assertEqual(booth["profile"], "booth")
         self.assertIs(booth["bypass"], False)
         self.assertEqual(booth["wetMix"], 0)
         self.assertEqual(booth["dryMix"], 1.0)
-        self.assertEqual(booth["deHarshLowpassHz"], 7400)
-        self.assertEqual(booth["highpassHz"], 115)
+        self.assertEqual(booth["deHarshLowpassHz"], 7800)
+        self.assertEqual(booth["highpassHz"], 125)
+        self.assertEqual(booth["reverbHighpassHz"], 20)
+        self.assertEqual(booth["reverbLowpassHz"], 20000)
         self.assertEqual(booth["slapbackDelaySec"], 0)
         self.assertEqual(booth["reverbDurationSec"], 0)
         self.assertEqual(res["boothWithMixArg"]["wetMix"], 0)
+        self.assertEqual(res["boothNst"]["highpassHz"], 145)
+        self.assertEqual(res["boothAlma"]["highpassHz"], 125)
+        self.assertEqual(res["boothLisa"]["highpassHz"], 125)
 
         arena = res["arenaDefault"]
         self.assertEqual(arena["profile"], "arena_pa")
         self.assertIs(arena["bypass"], False)
-        self.assertEqual(arena["slapbackDelaySec"], 0.085)
-        self.assertEqual(arena["slapbackFeedback"], 0.18)
-        self.assertEqual(arena["reverbDurationSec"], 1.35)
-        self.assertEqual(arena["deHarshLowpassHz"], 7400)
-        self.assertEqual(arena["wetMix"], 0.28)
-        self.assertEqual(arena["dryMix"], 1.0)
+        self.assertEqual(arena["highpassHz"], 125)
+        self.assertEqual(arena["slapbackDelaySec"], 0.075)
+        self.assertEqual(arena["slapbackFeedback"], 0.12)
+        self.assertEqual(arena["reverbDurationSec"], 1.15)
+        self.assertEqual(arena["deHarshLowpassHz"], 7800)
+        self.assertEqual(arena["reverbHighpassHz"], 280)
+        self.assertEqual(arena["reverbLowpassHz"], 2600)
+        self.assertEqual(arena["wetMix"], 0.099)
+        self.assertEqual(arena["dryMix"], 0.96)
 
-        self.assertEqual(res["arenaCustomMix"]["wetMix"], 0.45)
+        self.assertEqual(res["arenaNst"]["highpassHz"], 145)
+        self.assertEqual(res["arenaNst"]["reverbHighpassHz"], 280)
+        self.assertEqual(res["arenaNst"]["reverbLowpassHz"], 2600)
+        self.assertEqual(res["arenaAlma"]["highpassHz"], 125)
+        self.assertEqual(res["arenaLisa"]["highpassHz"], 125)
+
+        self.assertEqual(res["arenaCustomMix"]["wetMix"], 0.203)
+        self.assertEqual(res["arenaCustomMix"]["dryMix"], 0.919)
         self.assertEqual(res["arenaClampLow"]["wetMix"], 0.0)
+        self.assertEqual(res["arenaClampLow"]["dryMix"], 1.0)
         self.assertEqual(res["arenaClampZero"]["wetMix"], 0.0)
-        self.assertEqual(res["arenaClampHigh"]["wetMix"], 0.8)
-        self.assertEqual(res["arenaClampNaN"]["wetMix"], 0.28)
-        self.assertEqual(res["arenaClampPosInf"]["wetMix"], 0.8)
+        self.assertEqual(res["arenaClampZero"]["dryMix"], 1.0)
+        self.assertEqual(res["arenaClampHigh"]["wetMix"], 0.36)
+        self.assertEqual(res["arenaClampHigh"]["dryMix"], 0.856)
+        self.assertEqual(res["arenaClampNaN"]["wetMix"], 0.099)
+        self.assertEqual(res["arenaClampNaN"]["dryMix"], 0.96)
+        self.assertEqual(res["arenaClampPosInf"]["wetMix"], 0.36)
+        self.assertEqual(res["arenaClampPosInf"]["dryMix"], 0.856)
         self.assertEqual(res["arenaClampNegInf"]["wetMix"], 0.0)
+        self.assertEqual(res["arenaClampNegInf"]["dryMix"], 1.0)
 
         self.assertEqual(res["invalidProfileFallback"]["profile"], "arena_pa")
-        self.assertEqual(res["invalidProfileFallback"]["wetMix"], 0.4)
+        self.assertEqual(res["invalidProfileFallback"]["wetMix"], 0.18)
+        self.assertEqual(res["invalidProfileFallback"]["dryMix"], 0.928)
 
     def test_30_tts_dsp_prosody_sanitize_match_config_and_profile(self) -> None:
         """Verify backward compatibility and clamping of the 6 new tts* fields + Alma voice in sanitizeSettings, sanitizeMatchProfile, and sanitizeMatchConfig."""
@@ -3671,9 +3720,9 @@ console.log(JSON.stringify({
             "ttsVoiceId": "sv_SE-nst-medium",
             "ttsAudioProfile": "arena_pa",
             "ttsDramaticPauses": True,
-            "ttsSentenceSilenceSec": 0.65,
-            "ttsExpressiveness": 0.75,
-            "ttsArenaReverbMix": 0.28,
+            "ttsSentenceSilenceSec": 0.45,
+            "ttsExpressiveness": 0.72,
+            "ttsArenaReverbMix": 0.22,
             "ttsPreChimeEnabled": False,
         }
         self.assertEqual(res["defaultSettings"], expected_defaults)
@@ -3735,7 +3784,7 @@ console.log(JSON.stringify({
                 "ttsVoiceId": "sv_SE-nst-medium",
                 "ttsAudioProfile": "studio",
                 "ttsDramaticPauses": True,
-                "ttsSentenceSilenceSec": 0.65,
+                "ttsSentenceSilenceSec": 0.45,
                 "ttsExpressiveness": 0.95,
                 "ttsArenaReverbMix": 0.0,
                 "ttsPreChimeEnabled": False,
@@ -3804,11 +3853,181 @@ console.log(JSON.stringify({
         self.assertEqual(
             res["directNaN"],
             {
-                "ttsSentenceSilenceSec": 0.65,
-                "ttsExpressiveness": 0.75,
-                "ttsArenaReverbMix": 0.28,
+                "ttsSentenceSilenceSec": 0.45,
+                "ttsExpressiveness": 0.72,
+                "ttsArenaReverbMix": 0.22,
             },
         )
+
+    def test_31_pronunciation_lexicon_hockey_variants(self) -> None:
+        """Verify Swedish pronunciation lexicon normalizes Hockey/ishockey across case, punctuation, and suffixes."""
+        script = """
+import { formatTextForArenaProsody } from './src/utils/domain.ts';
+
+console.log(JSON.stringify({
+  upperHockeyOn: formatTextForArenaProsody('Hockey', true),
+  upperHockeyOff: formatTextForArenaProsody('Hockey', false),
+  lowerHockeyOn: formatTextForArenaProsody('hockey', true),
+  lowerHockeyOff: formatTextForArenaProsody('hockey', false),
+  sundsvallHockeyOn: formatTextForArenaProsody('Sundsvall Hockey!', true),
+  sundsvallHockeyOff: formatTextForArenaProsody('Sundsvall Hockey!', false),
+  lowerIshockeyOn: formatTextForArenaProsody('ishockey', true),
+  lowerIshockeyOff: formatTextForArenaProsody('ishockey', false),
+  upperIshockeyOn: formatTextForArenaProsody('Ishockey', true),
+  compoundsOn: formatTextForArenaProsody('Ishockeylag spelar Hockeymatch på hockeyplan med ishockeyns regler.', true),
+  compoundsOff: formatTextForArenaProsody('Ishockeylag spelar Hockeymatch på hockeyplan med ishockeyns regler.', false),
+  nonMatchWord: formatTextForArenaProsody('Vilken chock i tredje perioden!', true),
+}));
+"""
+        res = run_ts_script(script)
+
+        self.assertEqual(res["upperHockeyOn"], "Håcki")
+        self.assertEqual(res["upperHockeyOff"], "Håcki")
+        self.assertEqual(res["lowerHockeyOn"], "håcki")
+        self.assertEqual(res["lowerHockeyOff"], "håcki")
+        self.assertEqual(res["sundsvallHockeyOn"], "Sundsvall Håcki!")
+        self.assertEqual(res["sundsvallHockeyOff"], "Sundsvall Håcki!")
+        self.assertEqual(res["lowerIshockeyOn"], "ishåcki")
+        self.assertEqual(res["lowerIshockeyOff"], "ishåcki")
+        self.assertEqual(res["upperIshockeyOn"], "Ishåcki")
+        self.assertEqual(
+            res["compoundsOn"],
+            "Ishåckilag spelar Håckimatch på håckiplan med ishåckins regler.",
+        )
+        self.assertEqual(
+            res["compoundsOff"],
+            "Ishåckilag spelar Håckimatch på håckiplan med ishåckins regler.",
+        )
+        self.assertEqual(res["nonMatchWord"], "Vilken chock i tredje perioden!")
+
+    def test_32_vits_sweet_spot_compression(self) -> None:
+        """Verify VITS sweet-spot compression caps noiseScale at 0.86 when expressiveness is 1.20 and stays bounded across the slider range."""
+        script = """
+import { calculatePiperProsodyParams } from './src/utils/domain.ts';
+
+const inputs = [0.3, 0.5, 0.6, 0.72, 0.82, 0.9, 1.0, 1.1, 1.2, 1.5];
+const sweep = inputs.map((expressiveness) => ({
+  expressiveness,
+  ...calculatePiperProsodyParams({ expressiveness }),
+}));
+
+console.log(JSON.stringify({
+  at120: calculatePiperProsodyParams({ expressiveness: 1.2 }),
+  at082: calculatePiperProsodyParams({ expressiveness: 0.82 }),
+  at072: calculatePiperProsodyParams({ expressiveness: 0.72 }),
+  at030: calculatePiperProsodyParams({ expressiveness: 0.3 }),
+  sweep,
+}));
+"""
+        res = run_ts_script(script)
+
+        self.assertEqual(res["at120"]["noiseScale"], 0.86)
+        self.assertEqual(res["at120"]["noiseW"], 0.847)
+        self.assertLessEqual(res["at120"]["noiseW"], 0.86)
+        self.assertEqual(res["at082"]["noiseScale"], 0.82)
+        self.assertEqual(res["at072"]["noiseScale"], 0.72)
+        self.assertEqual(res["at072"]["noiseW"], 0.784)
+        self.assertEqual(res["at030"]["noiseScale"], 0.5)
+        self.assertEqual(res["at030"]["noiseW"], 0.685)
+
+        prev_ns = 0.0
+        prev_nw = 0.0
+        for row in res["sweep"]:
+            self.assertGreaterEqual(row["noiseScale"], 0.50, row)
+            self.assertLessEqual(row["noiseScale"], 0.86, row)
+            self.assertGreaterEqual(row["noiseW"], 0.65, row)
+            self.assertLessEqual(row["noiseW"], 0.86, row)
+            self.assertGreaterEqual(row["noiseScale"], prev_ns, row)
+            self.assertGreaterEqual(row["noiseW"], prev_nw, row)
+            prev_ns = row["noiseScale"]
+            prev_nw = row["noiseW"]
+
+    def test_33_nst_compensation_vs_alma_and_lisa(self) -> None:
+        """Verify NST-specific lengthScale (0.84), sentenceSilence (0.65), and highpassHz (145 Hz) compensation vs Alma/Lisa (1.0, 1.0, 125 Hz)."""
+        script = """
+import {
+  calculatePiperProsodyParams,
+  computeTtsDspChainConfig,
+} from './src/utils/domain.ts';
+
+console.log(JSON.stringify({
+  prosodyDefault: {
+    nst: calculatePiperProsodyParams({ voiceId: 'sv_SE-nst-medium' }),
+    alma: calculatePiperProsodyParams({ voiceId: 'sv_SE-alma-medium' }),
+    lisa: calculatePiperProsodyParams({ voiceId: 'sv_SE-lisa-medium' }),
+    omitted: calculatePiperProsodyParams({}),
+  },
+  prosodyScaled: {
+    nst: calculatePiperProsodyParams({
+      voiceId: 'sv_SE-nst-medium',
+      rate: 1.25,
+      sentenceSilenceSec: 1.0,
+      expressiveness: 0.72,
+    }),
+    alma: calculatePiperProsodyParams({
+      voiceId: 'sv_SE-alma-medium',
+      rate: 1.25,
+      sentenceSilenceSec: 1.0,
+      expressiveness: 0.72,
+    }),
+    lisa: calculatePiperProsodyParams({
+      voiceId: 'sv_SE-lisa-medium',
+      rate: 1.25,
+      sentenceSilenceSec: 1.0,
+      expressiveness: 0.72,
+    }),
+  },
+  prosodyNstBounds: {
+    fastShort: calculatePiperProsodyParams({
+      voiceId: 'sv_SE-nst-medium',
+      rate: 2.0,
+      sentenceSilenceSec: 0.1,
+    }),
+    slowLong: calculatePiperProsodyParams({
+      voiceId: 'sv_SE-nst-medium',
+      rate: 0.5,
+      sentenceSilenceSec: 1.5,
+    }),
+  },
+  dsp: {
+    arenaNst: computeTtsDspChainConfig('arena_pa', 0.22, 'sv_SE-nst-medium'),
+    arenaAlma: computeTtsDspChainConfig('arena_pa', 0.22, 'sv_SE-alma-medium'),
+    arenaLisa: computeTtsDspChainConfig('arena_pa', 0.22, 'sv_SE-lisa-medium'),
+    boothNst: computeTtsDspChainConfig('booth', 0.22, 'sv_SE-nst-medium'),
+    boothAlma: computeTtsDspChainConfig('booth', 0.22, 'sv_SE-alma-medium'),
+    boothLisa: computeTtsDspChainConfig('booth', 0.22, 'sv_SE-lisa-medium'),
+  },
+}));
+"""
+        res = run_ts_script(script)
+
+        pd = res["prosodyDefault"]
+        self.assertEqual(pd["nst"], {"lengthScale": 0.84, "sentenceSilence": 0.293, "noiseScale": 0.72, "noiseW": 0.784})
+        for key in ("alma", "lisa", "omitted"):
+            self.assertEqual(pd[key], {"lengthScale": 1.0, "sentenceSilence": 0.45, "noiseScale": 0.72, "noiseW": 0.784})
+
+        ps = res["prosodyScaled"]
+        self.assertEqual(ps["nst"], {"lengthScale": 0.672, "sentenceSilence": 0.65, "noiseScale": 0.72, "noiseW": 0.784})
+        self.assertEqual(ps["alma"], {"lengthScale": 0.8, "sentenceSilence": 1.0, "noiseScale": 0.72, "noiseW": 0.784})
+        self.assertEqual(ps["lisa"], {"lengthScale": 0.8, "sentenceSilence": 1.0, "noiseScale": 0.72, "noiseW": 0.784})
+
+        nb = res["prosodyNstBounds"]
+        self.assertEqual(nb["fastShort"]["lengthScale"], 0.45)
+        self.assertEqual(nb["fastShort"]["sentenceSilence"], 0.1)
+        self.assertEqual(nb["slowLong"]["lengthScale"], 1.68)
+        self.assertEqual(nb["slowLong"]["sentenceSilence"], 0.95)
+
+        dsp = res["dsp"]
+        self.assertEqual(dsp["arenaNst"]["highpassHz"], 145)
+        self.assertEqual(dsp["arenaNst"]["reverbHighpassHz"], 280)
+        self.assertEqual(dsp["arenaNst"]["reverbLowpassHz"], 2600)
+        self.assertEqual(dsp["arenaNst"]["wetMix"], 0.099)
+        self.assertEqual(dsp["arenaNst"]["dryMix"], 0.96)
+        self.assertEqual(dsp["arenaAlma"]["highpassHz"], 125)
+        self.assertEqual(dsp["arenaLisa"]["highpassHz"], 125)
+        self.assertEqual(dsp["boothNst"]["highpassHz"], 145)
+        self.assertEqual(dsp["boothAlma"]["highpassHz"], 125)
+        self.assertEqual(dsp["boothLisa"]["highpassHz"], 125)
 
 
 if __name__ == "__main__":
